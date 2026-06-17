@@ -1,0 +1,79 @@
+# Python bytecode and caches
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Packaging
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# Test and tool output
+.tox/
+.nox/
+coverage.xml
+junit.xml
+
+# Environment files and secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+client_secret*.json
+credentials*.json
+token*.json
+
+# Local BridgAI data and generated reports
+AI_SUPER_REPORT*.md
+REPORT_DIAGNOSTIC*.md
+LocalAIBridgeTemp/
+exports/
+imports/
+patches/
+logs/
+sessions/
+backups/
+
+# Temporary archives
+*.zip.tmp
+*.part
+
+# IDEs and editors
+.idea/
+.vscode/
+*.code-workspace
+*.swp
+*.swo
+*~
+
+# Operating system files
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Local build artifacts
+*.spec
+
+# Local logs, editor backups, and temporary files
+*.log
+*.tmp
+*.bak
+*.orig
+
+# Generated BridgAI change packages and reserved ZIP metadata
+*.zip
+/commit-message.md

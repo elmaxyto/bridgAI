@@ -1,0 +1,238 @@
+from pathlib import Path
+
+from local_ai_bridge.core.settings import AppSettings, SettingsStore
+
+
+def test_temp_directory_round_trip(tmp_path: Path) -> None:
+    store = SettingsStore()
+    store.path = tmp_path / "settings.json"
+    settings = AppSettings(temp_directory=str(tmp_path / "base"))
+    store.save(settings)
+    assert store.load().temp_directory == str(tmp_path / "base")
+
+
+def test_merge_task_text() -> None:
+    from local_ai_bridge.services.speech_to_text import merge_task_text
+
+    assert merge_task_text("", " nuovo task ") == "nuovo task"
+    assert merge_task_text("task esistente\n", "aggiunta") == "task esistente\naggiunta"
+    assert merge_task_text("task esistente", "  ") == "task esistente"
+
+
+def test_system_dictation_hints() -> None:
+    from local_ai_bridge.ui.speech_dialog import system_dictation_hint
+
+    assert "Win + H" in system_dictation_hint("Windows")
+    assert "Tastiera > Dettatura" in system_dictation_hint("Darwin")
+    assert "Linux" in system_dictation_hint("Linux")
+
+
+def test_gemini_drive_settings_round_trip(tmp_path: Path) -> None:
+    store = SettingsStore()
+    store.path = tmp_path / "settings.json"
+    settings = AppSettings(
+        gemini_drive_enabled=True,
+        gemini_drive_path=str(tmp_path / "Google Drive"),
+    )
+    store.save(settings)
+    loaded = store.load()
+    assert loaded.gemini_drive_enabled is True
+    assert loaded.gemini_drive_path == str(tmp_path / "Google Drive")
+
+
+def test_gemini_drive_settings_are_backward_compatible(tmp_path: Path) -> None:
+    store = SettingsStore()
+    store.path = tmp_path / "settings.json"
+    store.path.write_text('{"last_workspace": "C:/workspace"}', encoding="utf-8")
+    loaded = store.load()
+    assert loaded.gemini_drive_enabled is False
+    assert loaded.gemini_drive_path == ""
+
+
+def test_update_zip_directory_round_trip(tmp_path: Path) -> None:
+    store = SettingsStore()
+    store.path = tmp_path / "settings.json"
+    expected = str(tmp_path / "Downloads")
+    store.save(AppSettings(update_zip_directory=expected))
+    assert store.load().update_zip_directory == expected
+
+
+def test_update_zip_directory_is_backward_compatible(tmp_path: Path) -> None:
+    store = SettingsStore()
+    store.path = tmp_path / "settings.json"
+    store.path.write_text('{"last_workspace": "C:/workspace"}', encoding="utf-8")
+    assert store.load().update_zip_directory == ""
+
+
+def test_language_round_trip(tmp_path: Path) -> None:
+    store = SettingsStore()
+    store.path = tmp_path / "settings.json"
+    store.save(AppSettings(language="en"))
+    assert store.load().language == "en"
+
+
+def test_language_is_backward_compatible(tmp_path: Path) -> None:
+    store = SettingsStore()
+    store.path = tmp_path / "settings.json"
+    store.path.write_text('{"last_workspace": "C:/workspace"}', encoding="utf-8")
+    assert store.load().language == "it"
+
+
+def test_i18n_catalog_falls_back_to_source_text() -> None:
+    from local_ai_bridge.i18n import configure_language, tr
+    configure_language("en")
+    assert tr("Impostazioni") == "Settings"
+    assert tr("Scegli root progetti") == "Choose project root"
+    assert tr("not-in-catalog") == "not-in-catalog"
+    configure_language("it")
+
+
+def test_gemini_drive_warning_is_shown_only_when_disabled() -> None:
+    from local_ai_bridge.ui.workflow_actions import gemini_drive_warning_required
+
+    assert gemini_drive_warning_required(False) is True
+    assert gemini_drive_warning_required(True) is False
+
+
+def test_simple_mode_round_trip(tmp_path: Path) -> None:
+    store = SettingsStore()
+    store.path = tmp_path / "settings.json"
+    store.save(AppSettings(simple_mode=False))
+    assert store.load().simple_mode is False
+
+
+def test_simple_mode_is_backward_compatible(tmp_path: Path) -> None:
+    store = SettingsStore()
+    store.path = tmp_path / "settings.json"
+    store.path.write_text('{"last_workspace": "C:/workspace"}', encoding="utf-8")
+    assert store.load().simple_mode is True
+
+
+def test_external_ai_and_manual_web_defaults_are_backward_compatible(tmp_path: Path) -> None:
+    store = SettingsStore()
+    store.path = tmp_path / "settings.json"
+    store.path.write_text('{"language": "it"}', encoding="utf-8")
+    loaded = store.load()
+    assert loaded.grok_url == "https://grok.com/"
+    assert loaded.web_auto_start is False
+
+
+def test_dark_mode_round_trip(tmp_path: Path) -> None:
+    store = SettingsStore()
+    store.path = tmp_path / "settings.json"
+    store.save(AppSettings(dark_mode=True))
+    assert store.load().dark_mode is True
+
+
+def test_dark_mode_is_backward_compatible(tmp_path: Path) -> None:
+    store = SettingsStore()
+    store.path = tmp_path / "settings.json"
+    store.path.write_text('{"last_workspace": "C:/workspace"}', encoding="utf-8")
+    assert store.load().dark_mode is False
+
+
+def test_fresh_install_starts_in_simple_mode(tmp_path: Path) -> None:
+    store = SettingsStore()
+    store.path = tmp_path / "missing-settings.json"
+    assert store.load().simple_mode is True
+
+
+
+def test_reset_project_ui_clears_project_specific_state() -> None:
+    from local_ai_bridge.ui.main_window import _reset_project_ui
+
+    class FakeEditor:
+        def __init__(self) -> None:
+            self.cleared = False
+
+        def clear(self) -> None:
+            self.cleared = True
+
+    class FakeTable:
+        def __init__(self) -> None:
+            self.rows = 3
+
+        def setRowCount(self, rows: int) -> None:
+            self.rows = rows
+
+    class FakeButton:
+        def __init__(self) -> None:
+            self.enabled = True
+
+        def setEnabled(self, enabled: bool) -> None:
+            self.enabled = enabled
+
+    class FakeWindow:
+        def __init__(self) -> None:
+            for name in (
+                'task_edit', 'report_edit', 'response_edit', 'gemini_result_edit', 'target_edit',
+                'zip_path_edit', 'diff_edit', 'session_details_edit',
+            ):
+                setattr(self, name, FakeEditor())
+            self.plan_table = FakeTable()
+            self.apply_button = FakeButton()
+            self.current_plan = object()
+            self._last_auto_copied_report = 'old report'
+
+    window = FakeWindow()
+    _reset_project_ui(window)
+
+    for name in (
+        'task_edit', 'report_edit', 'response_edit', 'gemini_result_edit', 'target_edit',
+        'zip_path_edit', 'diff_edit', 'session_details_edit',
+    ):
+        assert getattr(window, name).cleared is True
+    assert window.plan_table.rows == 0
+    assert window.apply_button.enabled is False
+    assert window.current_plan is None
+    assert window._last_auto_copied_report is None
+
+
+def test_project_display_name_uses_only_directory_name() -> None:
+    from local_ai_bridge.ui.main_window import _project_display_name
+
+    assert _project_display_name(Path("C:/software/LocalBridge")) == "LocalBridge"
+    assert _project_display_name(Path("/home/user/example")) == "example"
+
+
+def test_validated_project_name_rejects_empty_and_path_components() -> None:
+    import pytest
+    from local_ai_bridge.ui.main_window import _validated_project_name
+
+    assert _validated_project_name("  My Project  ") == "My Project"
+    for invalid in ("", "   ", ".", "..", "folder/name", "folder\\name"):
+        with pytest.raises(ValueError):
+            _validated_project_name(invalid)
+
+
+def test_web_workspace_root_round_trip(tmp_path: Path) -> None:
+    store = SettingsStore()
+    store.path = tmp_path / "settings.json"
+    expected = str(tmp_path / "projects")
+    store.save(AppSettings(web_workspace_root=expected))
+    assert store.load().web_workspace_root == expected
+
+
+def test_web_workspace_root_is_backward_compatible(tmp_path: Path) -> None:
+    store = SettingsStore()
+    store.path = tmp_path / "settings.json"
+    store.path.write_text('{"language": "it"}', encoding="utf-8")
+    assert store.load().web_workspace_root == ""
+
+
+def test_web_credentials_round_trip_without_plaintext_password(tmp_path: Path) -> None:
+    from local_ai_bridge.web.security import hash_password
+
+    store = SettingsStore()
+    store.path = tmp_path / "settings.json"
+    password_hash = hash_password("a sufficiently long password")
+    store.save(AppSettings(
+        web_remote_access=True,
+        web_username="admin",
+        web_password_hash=password_hash,
+    ))
+    loaded = store.load()
+    assert loaded.web_remote_access is True
+    assert loaded.web_username == "admin"
+    assert loaded.web_password_hash == password_hash
+    assert "a sufficiently long password" not in store.path.read_text(encoding="utf-8")

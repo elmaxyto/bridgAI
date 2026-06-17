@@ -1,0 +1,384 @@
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import secrets
+import threading
+import urllib.parse
+import webbrowser
+from dataclasses import asdict
+from datetime import datetime
+from http import HTTPStatus
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from importlib.metadata import PackageNotFoundError, version
+from pathlib import Path
+from typing import Any
+
+from local_ai_bridge.services.git import GitIntegrationError
+from local_ai_bridge.web.network import connection_status_payload
+from local_ai_bridge.web.page import render_index, render_manifest
+from local_ai_bridge.web.project_actions import (
+    dispatch_project_action,
+    project_status_payload,
+    resolve_startup_workspace_root,
+)
+from local_ai_bridge.web.security import WebSecurityConfig
+from local_ai_bridge.web.state import BridgeState
+
+MAX_JSON_BODY_BYTES = 2_000_000
+MAX_UPLOAD_BYTES = 100 * 1024 * 1024
+
+
+def _application_version() -> str:
+    try:
+        return version("local-ai-bridge")
+    except PackageNotFoundError:
+        return "development"
+
+
+APPLICATION_VERSION = _application_version()
+
+
+def _safe_upload_name(value: str | None) -> str:
+    raw = urllib.parse.unquote(value or "update.zip")
+    name = Path(raw).name.replace("\x00", "").strip() or "update.zip"
+    if Path(name).suffix.lower() != ".zip":
+        raise ValueError("È possibile caricare soltanto un file ZIP.")
+    return name
+
+
+def _plan_payload(state: BridgeState, plan_id: str) -> dict[str, Any]:
+    plan = state.get_plan(plan_id)
+    return {
+        "plan_id": plan_id,
+        "plan_type": plan.plan_type,
+        "changes": [asdict(change) for change in plan.changes],
+        "warnings": plan.warnings,
+        "diff": plan.diff,
+        "commit_message": plan.metadata.get("commit_message"),
+    }
+
+
+class BridgeHandler(BaseHTTPRequestHandler):
+    server: "BridgeHTTPServer"
+
+    def log_message(self, format: str, *args: Any) -> None:
+        print(f"[{self.log_date_time_string()}] {self.client_address[0]} {format % args}")
+
+    def _is_local_client(self) -> bool:
+        return self.client_address[0] in {"127.0.0.1", "::1"}
+
+    def _send_security_headers(self) -> None:
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("X-Frame-Options", "DENY")
+        self.send_header("Referrer-Policy", "no-referrer")
+
+    def _json(self, status: int, payload: dict[str, Any]) -> None:
+        data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(data)))
+        self._send_security_headers()
+        self.end_headers()
+        self.wfile.write(data)
+
+    def _html(self, body: str) -> None:
+        data = body.encode("utf-8")
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(data)))
+        self._send_security_headers()
+        self.send_header(
+            "Content-Security-Policy",
+            "default-src 'self'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; "
+            "connect-src 'self'; img-src 'self' data:; frame-ancestors 'none'; base-uri 'none'",
+        )
+        self.end_headers()
+        self.wfile.write(data)
+
+    def _read_body(self, maximum: int) -> bytes:
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+        except ValueError as exc:
+            raise ValueError("Content-Length non valido.") from exc
+        if length < 0 or length > maximum:
+            raise ValueError("Corpo richiesta troppo grande.")
+        return self.rfile.read(length)
+
+    def _read_json(self) -> dict[str, Any]:
+        raw = self._read_body(MAX_JSON_BODY_BYTES)
+        value = json.loads(raw.decode("utf-8") or "{}")
+        if not isinstance(value, dict):
+            raise ValueError("Il corpo JSON deve essere un oggetto.")
+        return value
+
+    def _require_api_access(self, *, write: bool = False) -> None:
+        security = self.server.state.security
+        if not security.accepts_authorization(self.headers.get("Authorization")):
+            raise PermissionError("Token di accesso non valido.")
+        if write and self.headers.get("X-Local-Bridge-CSRF") != self.server.state.csrf_token:
+            raise PermissionError("Token CSRF non valido.")
+
+    def _send_artifact(self, artifact_id: str) -> None:
+        artifact = self.server.state.get_artifact(artifact_id)
+        size = artifact.path.stat().st_size
+        filename = artifact.filename.replace('"', "_").replace("\r", "_").replace("\n", "_")
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", artifact.content_type)
+        self.send_header("Content-Length", str(size))
+        self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
+        self._send_security_headers()
+        self.end_headers()
+        with artifact.path.open("rb") as stream:
+            while chunk := stream.read(1024 * 128):
+                self.wfile.write(chunk)
+
+    def do_GET(self) -> None:
+        try:
+            parsed = urllib.parse.urlsplit(self.path)
+            if parsed.path == "/":
+                connection = connection_status_payload(
+                    bind_host=str(self.server.server_address[0]),
+                    port=int(self.server.server_address[1]),
+                    remote_mode=self.server.state.security.remote_mode,
+                    host_header=self.headers.get("Host"),
+                )
+                self._html(
+                    render_index(
+                        self.server.state.csrf_token,
+                        APPLICATION_VERSION,
+                        connection_address=connection["connection_address"],
+                    )
+                )
+                return
+            if parsed.path == "/manifest.webmanifest":
+                data = render_manifest(APPLICATION_VERSION).encode("utf-8")
+                self.send_response(HTTPStatus.OK)
+                self.send_header("Content-Type", "application/manifest+json; charset=utf-8")
+                self.send_header("Content-Length", str(len(data)))
+                self._send_security_headers()
+                self.end_headers()
+                self.wfile.write(data)
+                return
+
+            self._require_api_access()
+            if parsed.path == "/api/status":
+                payload = project_status_payload(self.server.state, APPLICATION_VERSION)
+                payload.update(
+                    connection_status_payload(
+                        bind_host=str(self.server.server_address[0]),
+                        port=int(self.server.server_address[1]),
+                        remote_mode=self.server.state.security.remote_mode,
+                        host_header=self.headers.get("Host"),
+                    )
+                )
+                self._json(HTTPStatus.OK, payload)
+                return
+            if parsed.path.startswith("/api/artifacts/"):
+                self._send_artifact(parsed.path.rsplit("/", 1)[-1])
+                return
+            self._json(HTTPStatus.NOT_FOUND, {"error": "Risorsa non trovata."})
+        except PermissionError as exc:
+            self._json(HTTPStatus.UNAUTHORIZED, {"error": str(exc)})
+        except FileNotFoundError as exc:
+            self._json(HTTPStatus.NOT_FOUND, {"error": str(exc)})
+        except Exception as exc:
+            self._json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": f"{type(exc).__name__}: {exc}"})
+
+    def do_POST(self) -> None:
+        try:
+            self._require_api_access(write=True)
+            if self.path == "/api/zip/upload":
+                payload = self._upload_zip()
+            else:
+                payload = self._dispatch(self.path, self._read_json())
+            self._json(HTTPStatus.OK, payload)
+        except PermissionError as exc:
+            self._json(HTTPStatus.FORBIDDEN, {"error": str(exc)})
+        except (ValueError, FileNotFoundError, GitIntegrationError) as exc:
+            self._json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+        except Exception as exc:
+            self._json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": f"{type(exc).__name__}: {exc}"})
+
+    def _upload_zip(self) -> dict[str, Any]:
+        state = self.server.state
+        workspace = state.require_workspace()
+        filename = _safe_upload_name(self.headers.get("X-File-Name"))
+        raw = self._read_body(MAX_UPLOAD_BYTES)
+        if not raw:
+            raise ValueError("Il file ZIP è vuoto.")
+        from local_ai_bridge.services.archive import inspect_zip
+        from local_ai_bridge.services.temp_storage import managed_subdir
+
+        imports = managed_subdir(state.settings.temp_directory, "imports")
+        target = imports / f"{secrets.token_hex(8)}_{filename}"
+        target.write_bytes(raw)
+        try:
+            plan = inspect_zip(workspace, target)
+        except Exception:
+            target.unlink(missing_ok=True)
+            raise
+        plan_id = state.register_plan(plan)
+        return _plan_payload(state, plan_id)
+
+    def _dispatch(self, path: str, body: dict[str, Any]) -> dict[str, Any]:
+        state = self.server.state
+        project_payload = dispatch_project_action(state, path, body)
+        if project_payload is not None:
+            return project_payload
+
+        workspace = state.require_workspace()
+        if path == "/api/report":
+            from local_ai_bridge.services.reporting import build_super_report
+
+            return {"report": build_super_report(workspace, str(body.get("task", "")))}
+        if path == "/api/export":
+            from local_ai_bridge.services.exporting import create_export_zip, parse_download_requests
+            from local_ai_bridge.services.temp_storage import managed_subdir
+
+            requested = parse_download_requests(str(body.get("text", "")))
+            exports = managed_subdir(state.settings.temp_directory, "exports")
+            stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            created = create_export_zip(workspace, requested, exports / f"ai_context_{stamp}.zip")
+            artifact = state.register_artifact(created, content_type="application/zip")
+            return {
+                "artifact_id": artifact.artifact_id,
+                "filename": artifact.filename,
+                "files": requested,
+            }
+        if path == "/api/patch/inspect":
+            from local_ai_bridge.services.patching import inspect_gemini_response
+
+            plan = inspect_gemini_response(workspace, str(body.get("text", "")))
+            plan_id = state.register_plan(plan)
+            return _plan_payload(state, plan_id)
+        if path == "/api/zip/inspect":
+            from local_ai_bridge.services.archive import inspect_zip
+            from local_ai_bridge.services.temp_storage import stage_import_zip
+
+            if state.security.remote_mode:
+                raise ValueError("Da remoto carica lo ZIP dal dispositivo invece di indicare un percorso server.")
+            staged = stage_import_zip(Path(str(body.get("path", ""))), state.settings.temp_directory)
+            plan_id = state.register_plan(inspect_zip(workspace, staged))
+            return _plan_payload(state, plan_id)
+        if path in {"/api/plan/apply", "/api/zip/apply"}:
+            if body.get("confirm") != "APPLY":
+                raise ValueError("Conferma di applicazione mancante.")
+            plan_id = str(body.get("plan_id", ""))
+            plan = state.get_plan(plan_id)
+            record = state.apply_service.apply(plan)
+            state.clear_plan(plan_id)
+            return {"session": record.to_dict()}
+        if path == "/api/rollback":
+            if body.get("confirm") != "ROLLBACK":
+                raise ValueError("Conferma di rollback mancante.")
+            record = state.apply_service.rollback_latest(workspace)
+            return {"session": record.to_dict()}
+        if path == "/api/tests":
+            from local_ai_bridge.services.testing import format_test_results, run_detected_tests
+
+            results = run_detected_tests(workspace)
+            return {"output": format_test_results(results), "results": [asdict(item) for item in results]}
+        if path == "/api/git/status":
+            from local_ai_bridge.services.git import git_status
+
+            return {"output": git_status(workspace)}
+        if path == "/api/git/diff":
+            from local_ai_bridge.services.git import git_diff
+
+            return {"output": git_diff(workspace)}
+        raise ValueError("Endpoint non supportato.")
+
+
+class BridgeHTTPServer(ThreadingHTTPServer):
+    daemon_threads = True
+
+    def __init__(self, address: tuple[str, int], state: BridgeState) -> None:
+        super().__init__(address, BridgeHandler)
+        self.state = state
+
+
+def serve(
+    host: str = "127.0.0.1",
+    port: int = 8765,
+    open_browser: bool = True,
+    *,
+    auth_token: str | None = None,
+    username: str | None = None,
+    password_hash: str | None = None,
+    workspace_root: str | Path | None = None,
+    workspace: str | Path | None = None,
+) -> None:
+    effective_root, explicit_root = resolve_startup_workspace_root(workspace_root, workspace)
+
+    security = WebSecurityConfig.build(
+        host=host,
+        auth_token=auth_token,
+        username=username,
+        password_hash=password_hash,
+        workspace_root=effective_root,
+        fixed_workspace=workspace,
+    )
+    state = BridgeState(
+        security=security,
+        initial_workspace=workspace,
+        workspace_root_locked=explicit_root or workspace is not None,
+    )
+    server = BridgeHTTPServer((host, port), state)
+    browser_host = "127.0.0.1" if host in {"0.0.0.0", "::"} else host
+    url = f"http://{browser_host}:{server.server_address[1]}/"
+    print(f"BridgAI Web {APPLICATION_VERSION}: {url}")
+    if host in {"0.0.0.0", "::"} or security.remote_mode:
+        from local_ai_bridge.web.network import local_ipv4_addresses
+        for ip in local_ipv4_addresses():
+            print(f"  Rete locale: http://{ip}:{server.server_address[1]}/")
+    if security.remote_mode:
+        if security.requires_authentication:
+            print("Accesso remoto attivo: usa HTTPS tramite VPN o reverse proxy; il server integrato non cifra il traffico.")
+        else:
+            print("Accesso dalla rete locale SENZA autenticazione. Tutti i dispositivi nella stessa rete possono accedere.")
+    print("Interrompi con Ctrl+C.")
+    if open_browser:
+        threading.Timer(0.4, lambda: webbrowser.open(url)).start()
+    try:
+        server.serve_forever(poll_interval=0.25)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        server.server_close()
+
+
+def _parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Pannello web mobile-first di BridgAI")
+    parser.add_argument("--host", default="127.0.0.1")
+    parser.add_argument("--port", type=int, default=8765)
+    parser.add_argument("--no-browser", action="store_true")
+    parser.add_argument("--workspace-root", help="Directory che contiene i workspace autorizzati")
+    parser.add_argument("--workspace", help="Workspace unico autorizzato")
+    parser.add_argument(
+        "--token-env",
+        default="BRIDGAI_WEB_TOKEN",
+        help="Nome della variabile d'ambiente contenente il token (default: BRIDGAI_WEB_TOKEN)",
+    )
+    return parser.parse_args()
+
+
+def main() -> int:
+    args = _parse_args()
+    token = os.environ.get(args.token_env)
+    username = os.environ.get("BRIDGAI_WEB_USERNAME")
+    password_hash = os.environ.get("BRIDGAI_WEB_PASSWORD_HASH")
+    workspace_root = args.workspace_root or os.environ.get("BRIDGAI_WORKSPACE_ROOT")
+    serve(
+        args.host,
+        args.port,
+        not args.no_browser,
+        auth_token=token,
+        username=username,
+        password_hash=password_hash,
+        workspace_root=workspace_root,
+        workspace=args.workspace,
+    )
+    return 0
