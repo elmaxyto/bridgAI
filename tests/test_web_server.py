@@ -71,3 +71,39 @@ def test_web_page_shows_connection_address() -> None:
     assert "Collegati a" in page
     assert 'id="connectionAddress">192.168.1.44:8765</strong>' in page
     assert "renderConnection(status)" in page
+
+
+def test_restart_endpoint(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+    state = BridgeState()
+    server = BridgeHTTPServer(("127.0.0.1", 0), state)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base = f"http://127.0.0.1:{server.server_address[1]}"
+    
+    restart_called = threading.Event()
+    
+    def mock_execv(prog, args):
+        restart_called.set()
+        raise RuntimeError("execv called successfully")
+        
+    def mock_exit(code):
+        pass
+        
+    import os
+    monkeypatch.setattr(os, "execv", mock_execv)
+    monkeypatch.setattr(os, "_exit", mock_exit)
+    
+    try:
+        status, payload = _request(
+            base + "/api/restart", "POST", {}, state.csrf_token
+        )
+        assert status == 200
+        assert "Riavvio" in payload["message"]
+        
+        # Wait for the background thread to run the restart logic
+        assert restart_called.wait(timeout=2.0)
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)

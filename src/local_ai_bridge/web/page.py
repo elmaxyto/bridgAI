@@ -72,7 +72,7 @@ pre { white-space:pre-wrap; overflow-wrap:anywhere; background:#07101f; border:1
 </style>
 </head>
 <body>
-<header><div class="row"><div><strong>BridgAI Web</strong><small>Server workspace control · __VERSION__</small><small class="connection-line">Collegati a <strong id="connectionAddress">__CONNECTION_ADDRESS__</strong></small></div><span id="modeBadge" class="badge">Connessione…</span></div></header>
+<header><div class="row"><div><strong>BridgAI Web</strong><small>Server workspace control · __VERSION__</small><small class="connection-line">Collegati a <strong id="connectionAddress">__CONNECTION_ADDRESS__</strong></small></div><div style="display:flex;align-items:center;gap:.55rem;"><span id="modeBadge" class="badge">Connessione…</span><button id="restartBtn" class="danger" style="display:none;padding:.2rem .6rem;min-height:unset;width:auto;font-size:.78rem;" onclick="restartProgram()">Riavvia</button></div></div></header>
 <div id="busy"><div>Operazione in corso…</div></div>
 <main>
 <section id="authCard" class="card">
@@ -244,6 +244,7 @@ async function refreshStatus() {
     lastStatus = status;
     document.getElementById('authCard').style.display = 'none';
     document.getElementById('appContent').style.display = 'block';
+    document.getElementById('restartBtn').style.display = 'inline-block';
     document.getElementById('modeBadge').textContent = status.remote_mode ? 'Remoto protetto' : 'Locale';
     renderConnection(status);
     renderProjectSettings(status);
@@ -258,9 +259,20 @@ async function refreshStatus() {
   } catch(error) {
     document.getElementById('authCard').style.display = 'block';
     document.getElementById('appContent').style.display = 'none';
+    document.getElementById('restartBtn').style.display = 'none';
     document.getElementById('modeBadge').textContent = 'Accesso richiesto';
     show('authResult', error.message, true); show('projectResult', error.message, true);
   }
+}
+async function restartProgram() {
+  if (!confirm("Sei sicuro di voler riavviare il programma?")) return;
+  await withBusy(async () => {
+    const data = await api('/api/restart', {});
+    alert("Richiesta di riavvio inviata. La pagina si ricaricherà tra pochi secondi.");
+    setTimeout(() => {
+      window.location.reload();
+    }, 4000);
+  }, 'projectResult').catch(() => {});
 }
 async function setWorkspace() { await withBusy(async()=>{
   const selector=document.getElementById('workspace');

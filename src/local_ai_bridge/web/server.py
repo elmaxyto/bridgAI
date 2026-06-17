@@ -229,6 +229,24 @@ class BridgeHandler(BaseHTTPRequestHandler):
         if project_payload is not None:
             return project_payload
 
+        if path == "/api/restart":
+            def perform_restart():
+                import time
+                import os
+                from local_ai_bridge.services.system import build_restart_command
+
+                time.sleep(0.5)
+                try:
+                    cmd = build_restart_command()
+                    os.chdir(cmd.working_directory)
+                    os.execv(cmd.program, [cmd.program] + cmd.arguments)
+                except Exception as exc:
+                    print(f"Errore durante il riavvio: {exc}", flush=True)
+                    os._exit(1)
+
+            threading.Thread(target=perform_restart, daemon=True).start()
+            return {"message": "Riavvio in corso..."}
+
         workspace = state.require_workspace()
         if path == "/api/report":
             from local_ai_bridge.services.reporting import build_super_report
