@@ -107,3 +107,19 @@ def test_restart_endpoint(tmp_path: Path, monkeypatch) -> None:
         server.shutdown()
         server.server_close()
         thread.join(timeout=5)
+
+
+def test_web_page_uses_guided_simple_workflow() -> None:
+    page = render_index("csrf", "1.0.0")
+
+    assert "Cosa vuoi fare oggi?" in page
+    assert "Prepara richiesta per l’AI" in page
+    assert "Continua su ChatGPT" in page
+    assert "Continua su Claude" in page
+    assert "Continua su Gemini" in page
+    assert "Prepara i file richiesti" in page
+    assert "Applica aggiornamento" in page
+    assert 'id="verificationTools"' in page
+    assert "Verifica e strumenti avanzati" in page
+    assert "5. Verifica" not in page
+    assert "4. Analizza la modifica restituita" not in page
