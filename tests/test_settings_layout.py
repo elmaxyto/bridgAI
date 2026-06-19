@@ -117,3 +117,15 @@ def test_new_settings_labels_are_translated() -> None:
         "l’altra viene disattivata automaticamente."
     )
     configure_language("it")
+
+
+def test_web_settings_expose_totp_enrollment_and_local_bypass() -> None:
+    from local_ai_bridge.ui.tabs import settings as settings_tab
+
+    source = Path(settings_tab.__file__).read_text(encoding="utf-8")
+    function_source = source[source.index("def build_settings_tab"):]
+    assert "_section('Autenticazione a due fattori')" in function_source
+    assert "web_totp_configure_button" in function_source
+    assert "web_totp_disable_button" in function_source
+    assert "web_totp_local_bypass_check" in function_source
+    assert "Non richiedere il codice 2FA" in function_source

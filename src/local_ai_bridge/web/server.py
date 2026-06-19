@@ -5,6 +5,7 @@ import json
 import os
 import secrets
 import threading
+import time
 import urllib.parse
 import webbrowser
 from dataclasses import asdict
@@ -24,7 +25,12 @@ from local_ai_bridge.web.project_actions import (
     project_status_payload,
     resolve_startup_workspace_root,
 )
-from local_ai_bridge.web.security import WebSecurityConfig
+from local_ai_bridge.web.security import (
+    AuthenticationRateLimitError,
+    WebSecurityConfig,
+    client_address_from_proxy,
+    is_loopback_address,
+)
 from local_ai_bridge.web.state import BridgeState
 
 MAX_JSON_BODY_BYTES = 2_000_000
@@ -68,8 +74,15 @@ class BridgeHandler(BaseHTTPRequestHandler):
     def log_message(self, format: str, *args: Any) -> None:
         print(f"[{self.log_date_time_string()}] {self.client_address[0]} {format % args}")
 
+    def _client_ip(self) -> str:
+        return client_address_from_proxy(
+            self.client_address[0],
+            self.headers.get("X-Forwarded-For"),
+            self.headers.get("X-Real-IP"),
+        )
+
     def _is_local_client(self) -> bool:
-        return self.client_address[0] in {"127.0.0.1", "::1"}
+        return self._client_ip() in {"127.0.0.1", "::1"}
 
     def _send_security_headers(self) -> None:
         self.send_header("Cache-Control", "no-store")
@@ -118,8 +131,10 @@ class BridgeHandler(BaseHTTPRequestHandler):
 
     def _require_api_access(self, *, write: bool = False) -> None:
         security = self.server.state.security
-        if not security.accepts_authorization(self.headers.get("Authorization")):
-            raise PermissionError("Token di accesso non valido.")
+        if not self.server.state.accepts_api_authorization(
+            self.headers.get("Authorization"), self._client_ip()
+        ):
+            raise PermissionError("Autenticazione non valida, incompleta o scaduta.")
         if write and self.headers.get("X-Local-Bridge-CSRF") != self.server.state.csrf_token:
             raise PermissionError("Token CSRF non valido.")
 
@@ -175,9 +190,14 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 self.wfile.write(data)
                 return
 
+            if parsed.path == "/api/auth/info":
+                self._json(HTTPStatus.OK, self.server.state.auth_info(self._client_ip()))
+                return
+
             self._require_api_access()
             if parsed.path == "/api/status":
                 payload = project_status_payload(self.server.state, APPLICATION_VERSION)
+                payload.update(self.server.state.auth_info(self._client_ip()))
                 payload.update(
                     connection_status_payload(
                         bind_host=str(self.server.server_address[0]),
@@ -201,12 +221,39 @@ class BridgeHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         try:
+            if self.path == "/api/auth/login":
+                if self.headers.get("X-Local-Bridge-CSRF") != self.server.state.csrf_token:
+                    raise PermissionError("Token CSRF non valido.")
+                body = self._read_json()
+                session = self.server.state.create_auth_session(
+                    self.headers.get("Authorization"),
+                    str(body.get("second_factor", "")),
+                    self._client_ip(),
+                )
+                self._json(
+                    HTTPStatus.OK,
+                    {
+                        "session_token": session.token,
+                        "expires_in": int(session.expires_at - time.monotonic()),
+                        "second_factor": session.second_factor,
+                    },
+                )
+                return
+            if self.path == "/api/auth/logout":
+                if self.headers.get("X-Local-Bridge-CSRF") != self.server.state.csrf_token:
+                    raise PermissionError("Token CSRF non valido.")
+                self.server.state.revoke_auth_session(self.headers.get("Authorization"))
+                self._json(HTTPStatus.OK, {"message": "Sessione terminata."})
+                return
+
             self._require_api_access(write=True)
             if self.path == "/api/zip/upload":
                 payload = self._upload_zip()
             else:
                 payload = self._dispatch(self.path, self._read_json())
             self._json(HTTPStatus.OK, payload)
+        except AuthenticationRateLimitError as exc:
+            self._json(HTTPStatus.TOO_MANY_REQUESTS, {"error": str(exc)})
         except PermissionError as exc:
             self._json(HTTPStatus.FORBIDDEN, {"error": str(exc)})
         except (ValueError, FileNotFoundError, GitIntegrationError) as exc:
@@ -293,7 +340,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
             from local_ai_bridge.services.archive import inspect_zip
             from local_ai_bridge.services.temp_storage import stage_import_zip
 
-            if state.security.remote_mode:
+            if state.security.remote_mode or not is_loopback_address(self._client_ip()):
                 raise ValueError("Da remoto carica lo ZIP dal dispositivo invece di indicare un percorso server.")
             staged = stage_import_zip(Path(str(body.get("path", ""))), state.settings.temp_directory)
             plan_id = state.register_plan(inspect_zip(workspace, staged))
@@ -366,6 +413,8 @@ def serve(
     auth_token: str | None = None,
     username: str | None = None,
     password_hash: str | None = None,
+    totp_secret: str | None = None,
+    totp_local_bypass: bool = False,
     workspace_root: str | Path | None = None,
     workspace: str | Path | None = None,
 ) -> None:
@@ -376,6 +425,8 @@ def serve(
         auth_token=auth_token,
         username=username,
         password_hash=password_hash,
+        totp_secret=totp_secret,
+        totp_local_bypass=totp_local_bypass,
         workspace_root=effective_root,
         fixed_workspace=workspace,
     )
@@ -428,6 +479,10 @@ def main() -> int:
     token = os.environ.get(args.token_env)
     username = os.environ.get("BRIDGAI_WEB_USERNAME")
     password_hash = os.environ.get("BRIDGAI_WEB_PASSWORD_HASH")
+    totp_secret = os.environ.get("BRIDGAI_WEB_TOTP_SECRET")
+    totp_local_bypass = os.environ.get("BRIDGAI_WEB_TOTP_LOCAL_BYPASS", "").strip().lower() in {
+        "1", "true", "yes", "on"
+    }
     workspace_root = args.workspace_root or os.environ.get("BRIDGAI_WORKSPACE_ROOT")
     serve(
         args.host,
@@ -436,6 +491,8 @@ def main() -> int:
         auth_token=token,
         username=username,
         password_hash=password_hash,
+        totp_secret=totp_secret,
+        totp_local_bypass=totp_local_bypass,
         workspace_root=workspace_root,
         workspace=args.workspace,
     )

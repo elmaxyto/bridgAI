@@ -85,3 +85,77 @@ def test_mobile_page_contains_username_and_password_login() -> None:
     assert "localStorage" in page
     assert "sessionStorage" in page
     assert "storageRemove('localStorage',authKey)" in page
+
+
+def test_totp_matches_rfc_6238_vector_and_rejects_replay() -> None:
+    import base64
+
+    from local_ai_bridge.web.security import totp_at, verify_totp
+
+    secret = base64.b32encode(b"12345678901234567890").decode("ascii").rstrip("=")
+    assert totp_at(secret, 59, digits=8) == "94287082"
+
+    code = totp_at(secret, 59)
+    assert verify_totp(secret, code, for_time=59, valid_window=0) == 1
+    assert verify_totp(secret, code, for_time=59, valid_window=0, last_counter=1) is None
+
+
+def test_two_factor_requires_password_authentication_and_can_bypass_private_lan(tmp_path: Path) -> None:
+    from local_ai_bridge.web.security import generate_totp_secret, hash_password
+
+    secret = generate_totp_secret()
+    with pytest.raises(ValueError, match="username e password"):
+        WebSecurityConfig.build(
+            host="0.0.0.0",
+            auth_token="t" * 32,
+            totp_secret=secret,
+            workspace_root=tmp_path,
+        )
+
+    config = WebSecurityConfig.build(
+        host="0.0.0.0",
+        username="admin",
+        password_hash=hash_password("a sufficiently long password"),
+        totp_secret=secret,
+        totp_local_bypass=True,
+        workspace_root=tmp_path,
+    )
+    assert config.requires_two_factor("192.168.1.20") is False
+    assert config.requires_two_factor("10.20.30.40") is False
+    assert config.requires_two_factor("8.8.8.8") is True
+
+
+def test_proxy_client_address_is_trusted_only_from_loopback() -> None:
+    from local_ai_bridge.web.security import client_address_from_proxy
+
+    assert client_address_from_proxy("127.0.0.1", "198.51.100.7") == "198.51.100.7"
+    assert client_address_from_proxy("192.168.1.10", "198.51.100.7") == "192.168.1.10"
+    assert client_address_from_proxy("127.0.0.1", "1.2.3.4, 8.8.8.8") == "8.8.8.8"
+
+
+def test_recovery_codes_are_high_entropy_and_hashable() -> None:
+    from local_ai_bridge.web.security import generate_recovery_codes, hash_recovery_code
+
+    codes = generate_recovery_codes()
+    assert len(codes) == 8
+    assert len(set(codes)) == 8
+    assert all(len(code) == 14 for code in codes)
+    assert all(len(hash_recovery_code(code)) == 64 for code in codes)
+
+def test_launcher_forwards_totp_credentials_behind_loopback_reverse_proxy() -> None:
+    from local_ai_bridge.web.launcher import _add_authentication_environment
+
+    environment: dict[str, str] = {}
+    _add_authentication_environment(
+        environment,
+        username="admin",
+        password_hash="pbkdf2-value",
+        totp_secret="JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP",
+        totp_local_bypass=True,
+    )
+
+    assert environment["BRIDGAI_WEB_USERNAME"] == "admin"
+    assert environment["BRIDGAI_WEB_PASSWORD_HASH"] == "pbkdf2-value"
+    assert environment["BRIDGAI_WEB_TOTP_SECRET"]
+    assert environment["BRIDGAI_WEB_TOTP_LOCAL_BYPASS"] == "1"
+

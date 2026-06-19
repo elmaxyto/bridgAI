@@ -65,6 +65,27 @@ def _creation_flags() -> int:
     return 0
 
 
+def _add_authentication_environment(
+    environment: dict[str, str],
+    *,
+    username: str | None,
+    password_hash: str | None,
+    totp_secret: str | None,
+    totp_local_bypass: bool,
+) -> None:
+    # Authentication must also be available while the integrated server is
+    # bound to loopback behind an HTTPS reverse proxy such as Nginx.
+    if not username or not password_hash:
+        return
+    environment["BRIDGAI_WEB_USERNAME"] = username
+    environment["BRIDGAI_WEB_PASSWORD_HASH"] = password_hash
+    if totp_secret:
+        environment["BRIDGAI_WEB_TOTP_SECRET"] = totp_secret
+        environment["BRIDGAI_WEB_TOTP_LOCAL_BYPASS"] = (
+            "1" if totp_local_bypass else "0"
+        )
+
+
 def start_web_interface(
     port: int = 8765,
     *,
@@ -73,6 +94,8 @@ def start_web_interface(
     remote_access: bool = False,
     username: str | None = None,
     password_hash: str | None = None,
+    totp_secret: str | None = None,
+    totp_local_bypass: bool = False,
     wait_seconds: float = 5.0,
     popen: Callable[..., subprocess.Popen[bytes]] = subprocess.Popen,
 ) -> WebLaunchResult:
@@ -103,9 +126,13 @@ def start_web_interface(
     log_path = web_log_path()
     log_stream = log_path.open("ab")
     environment = _subprocess_environment(root)
-    if remote_access and username and password_hash:
-        environment["BRIDGAI_WEB_USERNAME"] = username
-        environment["BRIDGAI_WEB_PASSWORD_HASH"] = password_hash
+    _add_authentication_environment(
+        environment,
+        username=username,
+        password_hash=password_hash,
+        totp_secret=totp_secret,
+        totp_local_bypass=totp_local_bypass,
+    )
     try:
         process = popen(
             command,

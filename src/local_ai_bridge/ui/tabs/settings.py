@@ -178,6 +178,41 @@ def build_settings_tab(window) -> QWidget:
     credentials_form.addRow(_('Username:'), window.web_username_edit)
     credentials_form.addRow(_('Password:'), window.web_password_edit)
     web_layout.addLayout(credentials_form)
+
+    two_factor_section, two_factor_layout = _section('Autenticazione a due fattori')
+    window.web_totp_status_label = _wrapped_label('2FA non configurata.')
+    two_factor_layout.addWidget(window.web_totp_status_label)
+    two_factor_row = QHBoxLayout()
+    window.web_totp_configure_button = _button(
+        _('Configura o rigenera 2FA'), window.configure_web_two_factor
+    )
+    window.web_totp_disable_button = _button(
+        _('Disabilita 2FA'), window.disable_web_two_factor
+    )
+    two_factor_row.addWidget(window.web_totp_configure_button)
+    two_factor_row.addWidget(window.web_totp_disable_button)
+    two_factor_row.addStretch(1)
+    two_factor_layout.addLayout(two_factor_row)
+    window.web_totp_local_bypass_check = ToggleSwitch(
+        _('Non richiedere il codice 2FA ai dispositivi della rete locale privata')
+    )
+    window.web_totp_local_bypass_check.setToolTip(
+        _(
+            'Username e password restano obbligatori. La deroga vale per loopback, reti private '
+            'RFC1918, link-local e IPv6 ULA. Dietro Nginx vengono accettati gli header del client '
+            'solo quando il proxy è sulla stessa macchina.'
+        )
+    )
+    two_factor_layout.addWidget(window.web_totp_local_bypass_check)
+    two_factor_layout.addWidget(
+        _wrapped_label(
+            'Per accessi Internet la 2FA resta obbligatoria. Il server riconosce la rete locale '
+            'dall’indirizzo client; con Nginx configura X-Forwarded-For e mantieni la porta '
+            'interna non esposta pubblicamente.'
+        )
+    )
+    web_layout.addWidget(two_factor_section)
+
     web_layout.addWidget(
         _wrapped_label(
             'L’accesso remoto richiede username e password. Per Internet usa sempre HTTPS '

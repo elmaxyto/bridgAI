@@ -9,11 +9,21 @@ from pathlib import Path
 
 from local_ai_bridge.core.models import ChangePlan
 from local_ai_bridge.core.settings import SettingsStore
-from local_ai_bridge.web.security import WebSecurityConfig, WorkspacePolicy
+from local_ai_bridge.web.security import (
+    AuthenticationRateLimitError,
+    WebSecurityConfig,
+    WorkspacePolicy,
+    hash_recovery_code,
+    normalize_recovery_code,
+    verify_totp,
+)
 
 
 PLAN_TTL_SECONDS = 30 * 60
 ARTIFACT_TTL_SECONDS = 60 * 60
+AUTH_SESSION_TTL_SECONDS = 12 * 60 * 60
+AUTH_FAILURE_WINDOW_SECONDS = 5 * 60
+AUTH_FAILURE_LIMIT = 8
 
 
 @dataclass(slots=True)
@@ -32,6 +42,15 @@ class DownloadArtifact:
     created_at: float
 
 
+@dataclass(slots=True)
+class AuthSession:
+    token: str
+    created_at: float
+    expires_at: float
+    client_ip: str
+    second_factor: str
+
+
 class BridgeState:
     def __init__(
         self,
@@ -48,10 +67,17 @@ class BridgeState:
         self.workspace: Path | None = None
         self.pending_plan: PendingPlan | None = None
         self.artifacts: dict[str, DownloadArtifact] = {}
+        self.auth_sessions: dict[str, AuthSession] = {}
+        self.auth_failures: dict[str, list[float]] = {}
         self.csrf_token = secrets.token_urlsafe(32)
         self.lock = threading.RLock()
         self._sessions = None
         self._apply_service = None
+        self._totp_last_counter = (
+            self.settings.web_totp_last_counter
+            if self.settings.web_totp_secret == (self.security.totp_secret or "")
+            else -1
+        )
 
         if self.security.workspace_root is not None and self.security.fixed_workspace is None:
             root_value = str(self.security.workspace_root)
@@ -102,6 +128,164 @@ class BridgeState:
 
     def _save_settings(self) -> None:
         self.settings_store.save(self.settings)
+
+    def auth_info(self, client_ip: str) -> dict[str, object]:
+        return {
+            "requires_authentication": self.security.requires_authentication,
+            "two_factor_enabled": self.security.two_factor_enabled,
+            "two_factor_required": self.security.requires_two_factor(client_ip),
+            "two_factor_local_bypass": self.security.totp_local_bypass,
+        }
+
+    def _drop_expired_auth_sessions(self) -> None:
+        now = time.monotonic()
+        for token in [
+            token
+            for token, session in self.auth_sessions.items()
+            if session.expires_at <= now
+        ]:
+            self.auth_sessions.pop(token, None)
+
+    def _session_from_header(self, header_value: str | None) -> AuthSession | None:
+        if not header_value or not header_value.startswith("Bearer "):
+            return None
+        token = header_value[7:].strip()
+        if not token:
+            return None
+        with self.lock:
+            self._drop_expired_auth_sessions()
+            for stored_token, session in self.auth_sessions.items():
+                if secrets.compare_digest(stored_token, token):
+                    return session
+        return None
+
+    def accepts_api_authorization(self, header_value: str | None, client_ip: str) -> bool:
+        if not self.security.requires_authentication:
+            return True
+        if self.security.accepts_static_token(header_value):
+            return True
+        if self._session_from_header(header_value) is not None:
+            return True
+        if self.security.requires_two_factor(client_ip):
+            return False
+        return self.security.accepts_primary_authorization(header_value)
+
+    def _prune_auth_failures(self, client_ip: str) -> list[float]:
+        now = time.monotonic()
+        recent = [
+            timestamp
+            for timestamp in self.auth_failures.get(client_ip, [])
+            if now - timestamp <= AUTH_FAILURE_WINDOW_SECONDS
+        ]
+        if recent:
+            self.auth_failures[client_ip] = recent
+        else:
+            self.auth_failures.pop(client_ip, None)
+        return recent
+
+    def _check_auth_rate_limit(self, client_ip: str) -> None:
+        with self.lock:
+            recent = self._prune_auth_failures(client_ip)
+            if len(recent) >= AUTH_FAILURE_LIMIT:
+                raise AuthenticationRateLimitError(
+                    "Troppi tentativi di accesso. Attendi alcuni minuti e riprova."
+                )
+
+    def _record_auth_failure(self, client_ip: str) -> None:
+        with self.lock:
+            recent = self._prune_auth_failures(client_ip)
+            recent.append(time.monotonic())
+            self.auth_failures[client_ip] = recent
+
+    def _record_auth_success(self, client_ip: str) -> None:
+        with self.lock:
+            self.auth_failures.pop(client_ip, None)
+
+    def _consume_recovery_code(self, code: str) -> bool:
+        # Recovery codes belong to the secret saved by the desktop settings.
+        # When the server is configured with an environment-only secret, do not
+        # accidentally accept recovery codes generated for a different secret.
+        if self.settings.web_totp_secret != (self.security.totp_secret or ""):
+            return False
+        normalized = normalize_recovery_code(code)
+        if len(normalized) != 12:
+            return False
+        try:
+            candidate_hash = hash_recovery_code(normalized)
+        except ValueError:
+            return False
+        with self.lock:
+            for index, stored_hash in enumerate(self.settings.web_totp_recovery_hashes):
+                if secrets.compare_digest(candidate_hash, str(stored_hash)):
+                    del self.settings.web_totp_recovery_hashes[index]
+                    self._save_settings()
+                    return True
+        return False
+
+    def _verify_second_factor(self, code: str) -> str:
+        secret = self.security.totp_secret
+        if secret is None:
+            return "not-required"
+        normalized = (code or "").strip()
+        if self._consume_recovery_code(normalized):
+            return "recovery"
+        with self.lock:
+            counter = verify_totp(
+                secret,
+                normalized,
+                valid_window=1,
+                last_counter=self._totp_last_counter,
+            )
+            if counter is None:
+                raise PermissionError("Codice di autenticazione a due fattori non valido o già utilizzato.")
+            self._totp_last_counter = counter
+            if self.settings.web_totp_secret == secret:
+                self.settings.web_totp_last_counter = counter
+                self._save_settings()
+        return "totp"
+
+    def create_auth_session(
+        self,
+        authorization_header: str | None,
+        second_factor_code: str,
+        client_ip: str,
+    ) -> AuthSession:
+        self._check_auth_rate_limit(client_ip)
+        if not self.security.accepts_primary_authorization(authorization_header):
+            self._record_auth_failure(client_ip)
+            raise PermissionError("Username o password non validi.")
+        try:
+            factor = (
+                self._verify_second_factor(second_factor_code)
+                if self.security.requires_two_factor(client_ip)
+                else "local-bypass" if self.security.two_factor_enabled else "password"
+            )
+        except PermissionError:
+            self._record_auth_failure(client_ip)
+            raise
+        self._record_auth_success(client_ip)
+        now = time.monotonic()
+        session = AuthSession(
+            token=secrets.token_urlsafe(32),
+            created_at=now,
+            expires_at=now + AUTH_SESSION_TTL_SECONDS,
+            client_ip=client_ip,
+            second_factor=factor,
+        )
+        with self.lock:
+            self._drop_expired_auth_sessions()
+            self.auth_sessions[session.token] = session
+        return session
+
+    def revoke_auth_session(self, authorization_header: str | None) -> None:
+        if not authorization_header or not authorization_header.startswith("Bearer "):
+            return
+        token = authorization_header[7:].strip()
+        with self.lock:
+            for stored_token in list(self.auth_sessions):
+                if secrets.compare_digest(stored_token, token):
+                    self.auth_sessions.pop(stored_token, None)
+                    break
 
     def set_workspace(self, raw_path: str) -> Path:
         path = self.workspace_policy.resolve_selection(raw_path)

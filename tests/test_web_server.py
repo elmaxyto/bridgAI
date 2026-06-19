@@ -236,9 +236,18 @@ def test_web_page_exposes_favicon_language_and_dictation_controls() -> None:
     assert 'changeLanguage(this.value)' in page
     assert 'bridgai-web-language' in page
     assert 'id="dictationButton"' in page
+    assert 'class="microphone-icon"' in page
+    assert 'aria-label="Avvia dettatura vocale"' in page
+    assert ">Dettatura</span>" in page
     assert 'toggleDictation()' in page
     assert 'SpeechRecognition' in page
     assert 'webkitSpeechRecognition' in page
+    assert "navigator.mediaDevices.getUserMedia" in page
+    assert "window.isSecureContext" in page
+    assert "Accesso al microfono negato" in page
+    assert "Il microfono richiede una connessione HTTPS" in page
+    assert ".dictation-button{position:absolute" in page
+    assert "border-radius:50%" in page
 
 
 def test_web_server_serves_svg_favicon(tmp_path: Path, monkeypatch) -> None:
@@ -258,3 +267,16 @@ def test_web_server_serves_svg_favicon(tmp_path: Path, monkeypatch) -> None:
         server.shutdown()
         server.server_close()
         thread.join(timeout=5)
+
+
+def test_web_page_exposes_two_factor_login_without_storing_password() -> None:
+    page = render_index("csrf", "1.0.0")
+
+    assert 'id="authSecondFactor"' in page
+    assert 'autocomplete="one-time-code"' in page
+    assert "/api/auth/info" in page
+    assert "/api/auth/login" in page
+    assert "/api/auth/logout" in page
+    assert "bridgai-web-session" in page
+    assert "Ricorda l’accesso su questo browser" in page
+    assert "La password e il codice 2FA non vengono conservati" in page

@@ -153,3 +153,112 @@ def test_remote_export_returns_downloadable_zip(tmp_path: Path, monkeypatch) -> 
         server.shutdown()
         server.server_close()
         thread.join(timeout=5)
+
+
+def test_two_factor_login_issues_session_and_rejects_totp_replay(tmp_path: Path, monkeypatch) -> None:
+    import base64
+
+    from local_ai_bridge.web.security import generate_totp_secret, hash_password, totp_at
+
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    secret = generate_totp_secret()
+    security = WebSecurityConfig.build(
+        host="0.0.0.0",
+        username="admin",
+        password_hash=hash_password("correct horse battery staple"),
+        totp_secret=secret,
+        fixed_workspace=workspace,
+    )
+    state = BridgeState(security=security)
+    server = BridgeHTTPServer(("127.0.0.1", 0), state)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base = f"http://127.0.0.1:{server.server_address[1]}"
+    basic = "Basic " + base64.b64encode(b"admin:correct horse battery staple").decode("ascii")
+    code = totp_at(secret)
+
+    def login(second_factor: str):
+        request = urllib.request.Request(
+            base + "/api/auth/login",
+            data=json.dumps({"second_factor": second_factor}).encode("utf-8"),
+            method="POST",
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": basic,
+                "X-Local-Bridge-CSRF": state.csrf_token,
+                "X-Forwarded-For": "8.8.8.8",
+            },
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=5) as response:
+                return response.status, json.loads(response.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            return exc.code, json.loads(exc.read().decode("utf-8"))
+
+    try:
+        status, payload = login(code)
+        assert status == 200
+        assert payload["second_factor"] == "totp"
+        session = payload["session_token"]
+
+        request = urllib.request.Request(
+            base + "/api/status",
+            headers={"Authorization": f"Bearer {session}", "X-Forwarded-For": "8.8.8.8"},
+        )
+        with urllib.request.urlopen(request, timeout=5) as response:
+            status_payload = json.loads(response.read().decode("utf-8"))
+        assert status_payload["two_factor_enabled"] is True
+        assert status_payload["two_factor_required"] is True
+
+        replay_status, replay_payload = login(code)
+        assert replay_status == 403
+        assert "già utilizzato" in replay_payload["error"]
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+def test_private_lan_can_skip_second_factor_when_explicitly_enabled(tmp_path: Path, monkeypatch) -> None:
+    import base64
+
+    from local_ai_bridge.web.security import generate_totp_secret, hash_password
+
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    security = WebSecurityConfig.build(
+        host="0.0.0.0",
+        username="admin",
+        password_hash=hash_password("correct horse battery staple"),
+        totp_secret=generate_totp_secret(),
+        totp_local_bypass=True,
+        fixed_workspace=workspace,
+    )
+    state = BridgeState(security=security)
+    server = BridgeHTTPServer(("127.0.0.1", 0), state)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base = f"http://127.0.0.1:{server.server_address[1]}"
+    basic = "Basic " + base64.b64encode(b"admin:correct horse battery staple").decode("ascii")
+    request = urllib.request.Request(
+        base + "/api/auth/login",
+        data=b'{"second_factor":""}',
+        method="POST",
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": basic,
+            "X-Local-Bridge-CSRF": state.csrf_token,
+            "X-Forwarded-For": "192.168.1.55",
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=5) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+        assert payload["second_factor"] == "local-bypass"
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)

@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, asdict
+import os
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 from platformdirs import user_data_dir
@@ -42,6 +43,11 @@ class AppSettings:
     web_remote_access: bool = False
     web_username: str = ""
     web_password_hash: str = ""
+    web_totp_enabled: bool = False
+    web_totp_secret: str = ""
+    web_totp_local_bypass: bool = False
+    web_totp_last_counter: int = -1
+    web_totp_recovery_hashes: list[str] = field(default_factory=list)
 
 
 class SettingsStore:
@@ -52,11 +58,22 @@ class SettingsStore:
         try:
             data = json.loads(self.path.read_text(encoding="utf-8"))
             values = {k: v for k, v in data.items() if k in AppSettings.__annotations__}
+            if not isinstance(values.get("web_totp_recovery_hashes", []), list):
+                values["web_totp_recovery_hashes"] = []
             return AppSettings(**values)
         except Exception:
             return AppSettings()
 
     def save(self, settings: AppSettings) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
         temp = self.path.with_suffix(".tmp")
         temp.write_text(json.dumps(asdict(settings), ensure_ascii=False, indent=2), encoding="utf-8")
+        try:
+            os.chmod(temp, 0o600)
+        except OSError:
+            pass
         temp.replace(self.path)
+        try:
+            os.chmod(self.path, 0o600)
+        except OSError:
+            pass

@@ -332,3 +332,34 @@ def test_markdown_exchange_mode_is_backward_compatible(tmp_path: Path) -> None:
     store.path.write_text('{"last_workspace": "C:/workspace"}', encoding="utf-8")
     assert store.load().markdown_exchange_mode is False
 
+
+
+def test_web_two_factor_settings_round_trip(tmp_path: Path) -> None:
+    store = SettingsStore()
+    store.path = tmp_path / "settings.json"
+    settings = AppSettings(
+        web_totp_enabled=True,
+        web_totp_secret="JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP",
+        web_totp_local_bypass=True,
+        web_totp_last_counter=123,
+        web_totp_recovery_hashes=["a" * 64, "b" * 64],
+    )
+    store.save(settings)
+    loaded = store.load()
+    assert loaded.web_totp_enabled is True
+    assert loaded.web_totp_secret == settings.web_totp_secret
+    assert loaded.web_totp_local_bypass is True
+    assert loaded.web_totp_last_counter == 123
+    assert loaded.web_totp_recovery_hashes == ["a" * 64, "b" * 64]
+
+
+def test_web_two_factor_settings_are_backward_compatible(tmp_path: Path) -> None:
+    store = SettingsStore()
+    store.path = tmp_path / "settings.json"
+    store.path.write_text('{"web_username": "admin"}', encoding="utf-8")
+    loaded = store.load()
+    assert loaded.web_totp_enabled is False
+    assert loaded.web_totp_secret == ""
+    assert loaded.web_totp_local_bypass is False
+    assert loaded.web_totp_last_counter == -1
+    assert loaded.web_totp_recovery_hashes == []

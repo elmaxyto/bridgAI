@@ -13,6 +13,7 @@ from local_ai_bridge.core.project_prompts import (
 from local_ai_bridge.services.temp_storage import clean_managed_temp, configured_temp_root
 from local_ai_bridge.web.launcher import start_web_interface, stop_web_interface
 from local_ai_bridge.web.security import hash_password
+from local_ai_bridge.ui.totp_dialog import enroll_totp
 GOOGLE_DRIVE_DOWNLOAD_URL = 'https://support.google.com/drive/answer/7329379'
 
 class SettingsActionsMixin:
@@ -106,6 +107,62 @@ class SettingsActionsMixin:
         self.web_remote_access_check.setChecked(self.settings.web_remote_access)
         self.web_username_edit.setText(self.settings.web_username)
         self.web_password_edit.clear()
+        self.web_totp_local_bypass_check.blockSignals(True)
+        self.web_totp_local_bypass_check.setChecked(self.settings.web_totp_local_bypass)
+        self.web_totp_local_bypass_check.blockSignals(False)
+        enabled = bool(self.settings.web_totp_enabled and self.settings.web_totp_secret)
+        self.web_totp_status_label.setText(
+            _('2FA attiva. Codici di recupero disponibili: {count}').format(
+                count=len(self.settings.web_totp_recovery_hashes)
+            )
+            if enabled else _('2FA non configurata.')
+        )
+        self.web_totp_disable_button.setEnabled(enabled)
+        self.web_totp_local_bypass_check.setEnabled(enabled)
+
+
+    def configure_web_two_factor(self) -> None:
+        if not self.save_web_settings():
+            return
+        username = self.settings.web_username.strip()
+        if not username or not self.settings.web_password_hash:
+            QMessageBox.warning(
+                self,
+                _('Configurazione 2FA incompleta'),
+                _('Configura e salva prima username e password della Web UI.'),
+            )
+            return
+        enrollment = enroll_totp(self, username)
+        if enrollment is None:
+            return
+        self.settings.web_totp_enabled = True
+        self.settings.web_totp_secret = enrollment.secret
+        self.settings.web_totp_last_counter = -1
+        self.settings.web_totp_recovery_hashes = enrollment.recovery_hashes
+        self.settings_store.save(self.settings)
+        self.refresh_web_settings()
+        self._show_status(_('Autenticazione a due fattori configurata. Riavvia la Web UI per applicarla.'))
+
+    def disable_web_two_factor(self) -> None:
+        if not self.settings.web_totp_enabled:
+            return
+        answer = QMessageBox.question(
+            self,
+            _('Disabilita 2FA'),
+            _('Disabilitare l’autenticazione a due fattori per la Web UI?'),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        self.settings.web_totp_enabled = False
+        self.settings.web_totp_secret = ''
+        self.settings.web_totp_local_bypass = False
+        self.settings.web_totp_last_counter = -1
+        self.settings.web_totp_recovery_hashes = []
+        self.settings_store.save(self.settings)
+        self.refresh_web_settings()
+        self._show_status(_('Autenticazione a due fattori disabilitata. Riavvia la Web UI per applicarla.'))
 
     def _stop_owned_web_interface_after_root_change(self) -> None:
         process = getattr(self, "web_process", None)
@@ -192,10 +249,28 @@ class SettingsActionsMixin:
                 return False
             self.settings.web_password_hash = password_hash
             self.web_password_edit.clear()
+        if remote_access and (not username or not self.settings.web_password_hash):
+            QMessageBox.warning(
+                self,
+                _('Credenziali mancanti'),
+                _('L’accesso dalla rete richiede username e password.'),
+            )
+            return False
+        if self.settings.web_totp_enabled and (not username or not self.settings.web_password_hash):
+            QMessageBox.warning(
+                self,
+                _('Configurazione 2FA incompleta'),
+                _('La 2FA richiede username e password configurati.'),
+            )
+            return False
         self.settings.web_port = port
         self.settings.web_open_browser = self.web_open_browser_check.isChecked()
         self.settings.web_remote_access = remote_access
         self.settings.web_username = username
+        self.settings.web_totp_local_bypass = (
+            self.web_totp_local_bypass_check.isChecked()
+            if self.settings.web_totp_enabled else False
+        )
         self.settings.web_auto_start = self.web_auto_start_check.isChecked()
         self.settings_store.save(self.settings)
         return True
@@ -211,6 +286,11 @@ class SettingsActionsMixin:
                 remote_access=self.settings.web_remote_access,
                 username=self.settings.web_username or None,
                 password_hash=self.settings.web_password_hash or None,
+                totp_secret=(
+                    self.settings.web_totp_secret
+                    if self.settings.web_totp_enabled else None
+                ),
+                totp_local_bypass=self.settings.web_totp_local_bypass,
             )
         except Exception as exc:
             QMessageBox.critical(self, _('Avvio interfaccia web fallito'), str(exc))

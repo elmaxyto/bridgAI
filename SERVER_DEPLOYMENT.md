@@ -145,3 +145,54 @@ Esegui il servizio con un utente Linux dedicato e senza privilegi amministrativi
 6. Allega lo ZIP a ChatGPT.
 7. Carica nel pannello lo ZIP restituito oppure incolla la patch SEARCH/REPLACE.
 8. Controlla il diff, applica, esegui i test e verifica Git.
+
+## Autenticazione a due fattori TOTP
+
+La Web UI può richiedere un secondo fattore compatibile con Google Authenticator,
+Microsoft Authenticator, 2FAS e altre app TOTP. La configurazione si esegue dalla
+scheda **Impostazioni → Interfaccia Web UI → Autenticazione a due fattori**:
+
+1. configura prima username e password;
+2. premi **Configura o rigenera 2FA**;
+3. scansiona il QR code e verifica un codice a 6 cifre;
+4. conserva i codici di recupero mostrati una sola volta;
+5. riavvia la Web UI.
+
+Il segreto TOTP e gli hash dei codici di recupero sono salvati nella directory dati
+dell'applicazione, non nel workspace. Il file delle impostazioni viene creato con
+permessi limitati all'utente quando il sistema operativo lo consente.
+
+La 2FA protegge il login interattivo con username e password. `BRIDGAI_WEB_TOKEN`
+rimane una credenziale tecnica alternativa pensata per automazioni e non richiede un
+codice TOTP: non configurarla insieme al login 2FA se non è realmente necessaria e
+proteggila come una password ad alta sensibilità.
+
+È disponibile l'opzione **Non richiedere il codice 2FA ai dispositivi della rete
+locale privata**. Quando è attiva:
+
+- username e password restano sempre obbligatori;
+- il codice TOTP viene omesso solo per loopback, reti IPv4 private RFC1918,
+  indirizzi link-local e reti IPv6 ULA;
+- gli accessi provenienti da indirizzi Internet pubblici continuano a richiedere 2FA.
+
+Dietro un reverse proxy locale BridgAI considera `X-Forwarded-For` o `X-Real-IP`
+solo se la connessione TCP verso il server integrato arriva da loopback. Per Nginx
+usa, per esempio:
+
+```nginx
+location / {
+    proxy_pass http://127.0.0.1:8765;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto https;
+}
+```
+
+Mantieni la porta `8765` non raggiungibile direttamente da Internet: il traffico
+pubblico deve passare esclusivamente dal reverse proxy HTTPS.
+
+Per un avvio headless puoi fornire il segreto TOTP tramite
+`BRIDGAI_WEB_TOTP_SECRET` e abilitare esplicitamente la deroga LAN con
+`BRIDGAI_WEB_TOTP_LOCAL_BYPASS=1`. Il segreto deve essere Base32 e contenere almeno
+160 bit.
