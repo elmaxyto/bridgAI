@@ -49,6 +49,16 @@ def test_full_python_file_is_validated(tmp_path: Path) -> None:
         inspect_full_file(tmp_path, "new.py", "def broken(:\n")
 
 
+def test_full_file_can_preserve_an_outer_code_fence(tmp_path: Path) -> None:
+    content = "```python\nprint('inside')\n```\n"
+
+    default_plan = inspect_full_file(tmp_path, "snippet.md", content)
+    preserved_plan = inspect_full_file(tmp_path, "snippet.md", content, strip_fence=False)
+
+    assert default_plan.metadata["contents"]["snippet.md"] == b"print('inside')"
+    assert preserved_plan.metadata["contents"]["snippet.md"] == content.encode("utf-8")
+
+
 def test_gemini_response_groups_multiple_blocks_by_file() -> None:
     response = """
 ### `src/example.py`

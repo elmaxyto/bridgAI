@@ -7,6 +7,7 @@ from local_ai_bridge.core.models import ChangePlan
 from local_ai_bridge.services.archive import inspect_zip
 from local_ai_bridge.services.temp_storage import latest_zip_file, managed_subdir, stage_import_zip
 from local_ai_bridge.services.testing import format_test_results, run_detected_tests, test_results_to_dicts, test_summary
+from local_ai_bridge.services.pre_apply import build_pre_apply_summary, format_pre_apply_summary
 
 
 class DiffHighlighter(QSyntaxHighlighter):
@@ -93,6 +94,8 @@ class ChangeActionsMixin:
 
     def display_plan(self, plan: ChangePlan) -> None:
         self.current_plan = plan
+        summary = build_pre_apply_summary(plan)
+        self.pre_apply_summary.setText(format_pre_apply_summary(summary))
         if not hasattr(self, '_diff_highlighter'):
             self._diff_highlighter = DiffHighlighter(self.diff_edit.document())
         self.plan_table.setRowCount(len(plan.changes))
@@ -133,13 +136,14 @@ class ChangeActionsMixin:
                 QMessageBox.No,
             )
         else:
+            summary_text = format_pre_apply_summary(build_pre_apply_summary(self.current_plan))
             names = '\n'.join((f'• {item.target}' for item in self.current_plan.changes[:20]))
             if len(self.current_plan.changes) > 20:
                 names += f'\n• ... e altri {len(self.current_plan.changes) - 20} file'
             answer = QMessageBox.question(
                 self,
                 _('Conferma applicazione'),
-                f'Verrà creato un backup persistente e applicato questo piano:\n\n{names}\n\nProcedere?',
+                f'Checklist pre-applicazione:\n\n{summary_text}\n\nFile:\n{names}\n\nProcedere?',
                 QMessageBox.Yes | QMessageBox.No,
                 QMessageBox.No,
             )
@@ -229,5 +233,6 @@ class ChangeActionsMixin:
         self.current_plan = None
         self.plan_table.setRowCount(0)
         self.diff_edit.clear()
+        self.pre_apply_summary.setText(_('La checklist pre-applicazione apparirà dopo l’analisi del piano.'))
         self.apply_button.setEnabled(False)
         self._show_status(_('Piano azzerato.'))

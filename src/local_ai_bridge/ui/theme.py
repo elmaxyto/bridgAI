@@ -36,12 +36,27 @@ def application_style(dark: bool = False) -> str:
     QToolButton {{ color: {colors['text']}; padding: 7px 10px; border-radius: 7px; }}
     QToolButton:hover {{ background: {colors['surface_alt']}; }}
     QTabWidget::pane {{ border: 0; background: {colors['window']}; }}
+    QScrollArea#settingsScrollArea, QScrollArea#advancedScrollArea {{
+        background: {colors['window']}; border: 0;
+    }}
+    QScrollArea#settingsScrollArea > QWidget > QWidget,
+    QScrollArea#advancedScrollArea > QWidget > QWidget,
+    QWidget#settingsScrollContent, QWidget#advancedScrollContent {{
+        background: {colors['window']};
+    }}
     QTabBar::tab {{
         background: transparent; padding: 10px 16px; margin-right: 4px;
         color: {colors['muted']}; border-bottom: 2px solid transparent;
     }}
     QTabBar::tab:selected {{ color: {colors['primary']}; border-bottom-color: {colors['primary']}; font-weight: 600; }}
-    QGroupBox {{ color: {colors['text']}; }}
+    QGroupBox {{
+        color: {colors['text']}; background: transparent; border: 1px solid {colors['border']};
+        border-radius: 8px; margin-top: 10px; padding: 10px 10px 8px 10px;
+    }}
+    QGroupBox::title {{
+        subcontrol-origin: margin; subcontrol-position: top left; left: 10px;
+        padding: 0 5px; color: {colors['text']}; background: {colors['window']};
+    }}
     QGroupBox[class="card"] {{
         background: {colors['surface']}; border: 1px solid {colors['border']};
         border-radius: 12px; margin-top: 0;
@@ -63,6 +78,7 @@ def application_style(dark: bool = False) -> str:
         background: {colors['surface_alt']}; border: 1px solid {colors['border']}; border-radius: 10px;
     }}
     QPlainTextEdit, QLineEdit, QComboBox {{
+        min-height: 18px;
         background: {colors['surface']}; color: {colors['text']}; border: 1px solid {colors['border']};
         border-radius: 8px; padding: 8px; selection-background-color: {colors['selection']};
     }}

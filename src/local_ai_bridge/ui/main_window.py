@@ -60,6 +60,7 @@ def _reset_project_ui(window) -> None:
         'task_edit',
         'report_edit',
         'response_edit',
+        'markdown_result_edit',
         'gemini_result_edit',
         'target_edit',
         'zip_path_edit',
@@ -74,8 +75,16 @@ def _reset_project_ui(window) -> None:
     if plan_table is not None:
         plan_table.setRowCount(0)
 
+    preset_combo = getattr(window, 'prompt_preset_combo', None)
+    if preset_combo is not None:
+        preset_combo.setCurrentIndex(0)
+
     window.current_plan = None
     window._last_auto_copied_report = None
+    pre_apply_summary = getattr(window, 'pre_apply_summary', None)
+    if pre_apply_summary is not None:
+        pre_apply_summary.setText(_('La checklist pre-applicazione apparirà dopo l’analisi del piano.'))
+
     apply_button = getattr(window, 'apply_button', None)
     if apply_button is not None:
         apply_button.setEnabled(False)
@@ -118,6 +127,7 @@ class MainWindow(WorkflowActionsMixin, ChangeActionsMixin, SystemActionsMixin, S
     def apply_simple_mode(self) -> None:
         simple = bool(self.settings.simple_mode)
         gemini_simple = simple and bool(self.settings.gemini_drive_enabled)
+        markdown_simple = simple and bool(self.settings.markdown_exchange_mode)
         if simple:
             if self.isFullScreen() or self.isMaximized():
                 self.showNormal()
@@ -127,13 +137,18 @@ class MainWindow(WorkflowActionsMixin, ChangeActionsMixin, SystemActionsMixin, S
         self.project_panel.setVisible(not simple)
         changes_index = self.tabs.indexOf(self.changes_tab)
         tests_index = self.tabs.indexOf(self.tests_tab)
+        publication_index = self.tabs.indexOf(self.publication_tab)
         advanced_index = self.tabs.indexOf(self.advanced_tab)
         if changes_index >= 0:
-            self.tabs.setTabVisible(changes_index, not simple or gemini_simple)
+            self.tabs.setTabVisible(changes_index, not simple or gemini_simple or markdown_simple)
             self.tabs.setTabText(
                 changes_index,
-                _('Anteprima e applicazione') if gemini_simple else _('2. ZIP, diff e applicazione'),
+                _('Anteprima e applicazione')
+                if gemini_simple or markdown_simple else _('2. ZIP, diff e applicazione'),
             )
+        if publication_index >= 0:
+            self.tabs.setTabVisible(publication_index, True)
+            self.tabs.setTabText(publication_index, _('Pubblicazione'))
         for index in (tests_index, advanced_index):
             if index >= 0:
                 self.tabs.setTabVisible(index, not simple)
@@ -145,35 +160,44 @@ class MainWindow(WorkflowActionsMixin, ChangeActionsMixin, SystemActionsMixin, S
             self.tabs.setTabText(settings_index, _('Preferenze') if simple else _('Impostazioni'))
         self.simple_welcome.setVisible(simple)
         self.simple_subtitle.setVisible(simple)
-        self.simple_finish_hint.setVisible(simple)
-        self.simple_finish_hint.setText(
-            _('Dopo la creazione dello ZIP, in Gemini premi “+”, scegli “Aggiungi da Drive”, apri “Recenti” e seleziona il file più recente.')
-            if gemini_simple
-            else _('3  Quando ricevi uno ZIP dall’AI, salvalo nella cartella scelta e premi “Applica aggiornamento”. Prima dell’applicazione verrà sempre mostrata un’anteprima.')
-        )
+        self.simple_finish_hint.setVisible(simple and not markdown_simple)
+        if gemini_simple:
+            finish_hint = _('Dopo la creazione dello ZIP, in Gemini premi “+”, scegli “Aggiungi da Drive”, apri “Recenti” e seleziona il file più recente.')
+        elif markdown_simple:
+            finish_hint = _('3  Carica il file Markdown nell’AI, incolla qui il documento modificato e premi “Analizza risposta”. Controlla sempre l’anteprima prima di applicare.')
+        else:
+            finish_hint = _('3  Quando ricevi uno ZIP dall’AI, salvalo nella cartella scelta e premi “Applica aggiornamento”. Prima dell’applicazione verrà sempre mostrata un’anteprima.')
+        self.simple_finish_hint.setText(finish_hint)
         self.report_edit.setVisible(not simple)
+        self.prompt_preset_label.setVisible(not simple)
+        self.prompt_preset_combo.setVisible(not simple)
         for button in self.report_extra_buttons:
             button.setVisible(not simple)
         self.simple_chatgpt_button.setVisible(simple and not gemini_simple)
         self.simple_claude_button.setVisible(simple and not gemini_simple)
         self.simple_gemini_button.setVisible(gemini_simple)
-        self.response_step_header.title_label.setText(
-            _('Incolla la richiesta di file di Gemini') if gemini_simple else _('Incolla la risposta dell’AI')
-        )
-        self.response_step_header.description_label.setText(
-            _('Copia la risposta con la riga #scarica, poi prepara lo ZIP da aggiungere alla chat tramite Google Drive.')
-            if gemini_simple
-            else _('Torna qui e incolla tutto il messaggio ricevuto, senza modificarlo.')
-        )
-        self.response_edit.setPlaceholderText(
-            _('Incolla qui la risposta di Gemini che contiene #scarica...')
-            if gemini_simple
-            else _('Incolla qui la risposta completa dell’AI...')
-        )
+        if gemini_simple:
+            response_title = _('Incolla la richiesta di file di Gemini')
+            response_description = _('Copia la risposta con la riga #scarica, poi prepara lo ZIP da aggiungere alla chat tramite Google Drive.')
+            response_placeholder = _('Incolla qui la risposta di Gemini che contiene #scarica...')
+        elif markdown_simple:
+            response_title = _('Incolla la richiesta di file dell’AI')
+            response_description = _('Copia la risposta con la riga #scarica, poi prepara il Markdown da caricare nella chat.')
+            response_placeholder = _('Incolla qui la risposta dell’AI che contiene #scarica...')
+        else:
+            response_title = _('Incolla la risposta dell’AI')
+            response_description = _('Torna qui e incolla tutto il messaggio ricevuto, senza modificarlo.')
+            response_placeholder = _('Incolla qui la risposta completa dell’AI...')
+        self.response_step_header.title_label.setText(response_title)
+        self.response_step_header.description_label.setText(response_description)
+        self.response_edit.setPlaceholderText(response_placeholder)
         self.simple_prepare_files_button.setText(
-            _('Prepara ZIP su Google Drive') if gemini_simple else _('Prepara i file richiesti')
+            _('Prepara ZIP su Google Drive')
+            if gemini_simple else _('Prepara Markdown')
+            if markdown_simple else _('Prepara i file richiesti')
         )
         self.gemini_result_group.setVisible(gemini_simple)
+        self.markdown_result_group.setVisible(markdown_simple)
         self.target_edit.setVisible(not simple)
         label = self.target_form.labelForField(self.target_edit)
         if label is not None:
@@ -182,22 +206,30 @@ class MainWindow(WorkflowActionsMixin, ChangeActionsMixin, SystemActionsMixin, S
             button.setVisible(not simple)
         for button in self.simple_response_buttons:
             button.setVisible(simple)
-        self.simple_apply_zip_button.setVisible(simple and not gemini_simple)
+        self.simple_apply_zip_button.setVisible(simple and not gemini_simple and not markdown_simple)
         self.simple_patch_directory_button.setVisible(
-            simple and not gemini_simple and not bool(self.settings.update_zip_directory.strip())
+            simple and not gemini_simple and not markdown_simple
+            and not bool(self.settings.update_zip_directory.strip())
         )
-        self.update_zip_settings_group.setVisible(not gemini_simple)
+        self.update_zip_settings_group.setVisible(not gemini_simple and not markdown_simple)
+        self.other_llm_settings_group.setVisible(not simple)
         self.change_source_group.setVisible(not gemini_simple)
         self.change_rollback_button.setVisible(not gemini_simple)
         self.restart_action.setVisible(not simple)
         self.simple_restart_button.setVisible(simple)
         for group in getattr(self, 'advanced_settings_groups', []):
             group.setVisible(not simple)
+        self.gemini_drive_settings_group.setVisible(not simple or not markdown_simple)
+        self.markdown_exchange_settings_group.setVisible(not simple or markdown_simple)
         if gemini_simple:
             self.report_button.setText(_('Prepara per Gemini'))
         else:
             self.report_button.setText(_('Prepara richiesta per l’AI') if simple else _('Genera Super-Report'))
-        allowed_simple_tabs = (self.workflow_tab, self.settings_tab, self.changes_tab) if gemini_simple else (self.workflow_tab, self.settings_tab)
+        allowed_simple_tabs = (
+            (self.workflow_tab, self.publication_tab, self.settings_tab, self.changes_tab)
+            if gemini_simple or markdown_simple
+            else (self.workflow_tab, self.publication_tab, self.settings_tab)
+        )
         if simple and self.tabs.currentWidget() not in allowed_simple_tabs:
             self.tabs.setCurrentWidget(self.workflow_tab)
 
@@ -337,10 +369,12 @@ class MainWindow(WorkflowActionsMixin, ChangeActionsMixin, SystemActionsMixin, S
         self.file_tree.setRootIndex(self.file_model.setRootPath(str(path)))
         self.settings.last_workspace = str(path)
         self.settings_store.save(self.settings)
+        self.refresh_prompt_settings()
         if not workspace_changed:
             self.current_plan = None
             self.apply_button.setEnabled(False)
         self._refresh_sessions()
+        self.refresh_publication_tab()
         if workspace_changed and previous_workspace is not None:
             self._show_status(
                 _('Progetto caricato: {name} — contenuti della sessione precedente azzerati.').format(

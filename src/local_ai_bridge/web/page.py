@@ -4,6 +4,7 @@ import html
 import json
 
 from local_ai_bridge.web.page_assets import PAGE_SCRIPT, PAGE_STYLE
+from local_ai_bridge.core.prompt_presets import load_prompt_presets
 
 
 def render_manifest(version: str) -> str:
@@ -23,8 +24,8 @@ def render_manifest(version: str) -> str:
 
 def _step(number: str, title: str, description: str, body: str) -> str:
     return f"""
-<section class="card">
-  <div class="step-head"><span class="step-number">{number}</span><div><h2>{title}</h2><p>{description}</p></div></div>
+<section class="card step-card">
+  <div class="step-head"><span class="step-number">{number}</span><div><p class="eyebrow">Passaggio {number} di 3</p><h2>{title}</h2><p>{description}</p></div></div>
   {body}
 </section>"""
 
@@ -35,13 +36,23 @@ def render_index(
     *,
     connection_address: str | None = None,
 ) -> str:
+    preset_options = ['<option value="">Nessun preset</option>']
+    for preset in load_prompt_presets():
+        preset_options.append(
+            f'<option value="{html.escape(preset.preset_id)}" title="{html.escape(preset.description)}">'
+            f'{html.escape(preset.label)}</option>'
+        )
+    preset_select = "".join(preset_options)
     task_step = _step(
         "1",
         "Descrivi la richiesta",
         "Scrivi con parole semplici cosa vuoi creare, correggere o migliorare.",
-        """
+        f"""
 <label for="task">Cosa vuoi ottenere?</label>
 <textarea id="task" placeholder="Ad esempio: rendi più semplice la schermata iniziale e usa pulsanti più chiari..."></textarea>
+<label for="promptPreset">Preset di prompt</label>
+<select id="promptPreset">{preset_select}</select>
+<p class="field-help">Il preset aggiunge istruzioni alla richiesta senza modificare il testo scritto.</p>
 <div class="actions"><button onclick="generateReport()">Prepara richiesta per l’AI</button></div>
 <div class="provider-actions">
   <button data-provider disabled onclick="openProvider('https://chatgpt.com/')">Continua su ChatGPT</button>
@@ -84,6 +95,7 @@ def render_index(
 </div></details>
 <div id="planSummary" class="feedback"></div>
 <div id="preview" class="preview">
+  <h3>Checklist pre-applicazione</h3><div id="preApplyChecklist" class="pre-apply-checklist"></div>
   <h3>Anteprima modifiche</h3><ul id="changeList" class="change-list"></ul>
   <details><summary>Mostra diff completo</summary><pre id="diff"></pre></details>
   <div class="actions"><button id="applyButton" class="success" onclick="applyPlan()" disabled>Applica aggiornamento</button></div>
@@ -98,15 +110,16 @@ def render_index(
 <html lang="it"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta name="theme-color" content="#2563eb"><link rel="manifest" href="/manifest.webmanifest"><title>BridgAI Web {safe_version}</title><style>{PAGE_STYLE}</style></head>
 <body>
-<header><div class="header-row"><div class="brand"><strong>BridgAI Web</strong><small class="connection-line">Collegati a <strong id="connectionAddress">{displayed_address}</strong></small></div><div class="header-meta"><span id="currentProject" class="project-name">Nessun progetto aperto</span><span id="modeBadge" class="badge">Connessione…</span></div></div></header>
+<header><div class="header-row"><div class="brand"><span class="brand-mark" aria-hidden="true">B</span><div><strong>BridgAI Web</strong><small class="connection-line">Collegati a <strong id="connectionAddress">{displayed_address}</strong></small></div></div><div class="header-meta"><span id="currentProject" class="project-chip">Nessun progetto aperto</span><span id="modeBadge" class="badge">Connessione…</span></div></div></header>
 <div id="busy"><div>Operazione in corso…</div></div>
 <main>
-<section id="authCard" class="card"><h2>Accesso</h2><p class="muted">Inserisci le credenziali configurate in BridgAI.</p><div class="grid"><div><label for="authUsername">Username</label><input id="authUsername" autocomplete="username"></div><div><label for="authPassword">Password</label><input id="authPassword" type="password" autocomplete="current-password"></div></div><div class="actions"><button onclick="login()">Accedi</button><button class="secondary" onclick="logout()">Disconnetti</button></div><div id="authResult" class="feedback"></div></section>
+<section id="authCard" class="card"><h2>Accesso</h2><p class="muted">Inserisci le credenziali configurate in BridgAI.</p><div class="grid"><div><label for="authUsername">Username</label><input id="authUsername" autocomplete="username"></div><div><label for="authPassword">Password</label><input id="authPassword" type="password" autocomplete="current-password"></div></div><label class="switch-row" for="rememberCredentials"><input id="rememberCredentials" type="checkbox"><span class="switch-track" aria-hidden="true"></span><span>Ricorda username e password su questo browser</span></label><p class="muted">Le credenziali restano nella memoria del browser fino a “Disconnetti”. Attiva questa opzione solo su un dispositivo personale e usa HTTPS o una VPN per l’accesso remoto.</p><div class="actions"><button onclick="login()">Accedi</button><button class="secondary" onclick="logout()">Disconnetti</button></div><div id="authResult" class="feedback"></div></section>
 <div id="appContent">
-<section class="card"><div class="status-strip"><div><span class="muted">Progetto corrente</span><div id="workspacePath" class="project-name">Nessun workspace selezionato</div></div></div>
+<section class="card"><div class="status-strip"><div><span class="muted">Progetto corrente</span><div id="workspacePath" class="project-name">Nessun workspace selezionato</div></div><button class="secondary" onclick="logout()">Disconnetti</button></div>
 <details id="projectTools"><summary>Scegli o gestisci progetto</summary><div class="details-body"><label for="workspaceRoot">Cartella root progetti</label><input id="workspaceRoot" readonly placeholder="Non configurata nel programma BridgAI"><p id="rootHelp" class="muted">Configura la root nelle Impostazioni del programma BridgAI e riavvia la Web UI.</p><div id="workspacePicker"></div><div class="actions"><button id="openWorkspaceButton" onclick="setWorkspace()">Apri progetto</button><button class="secondary" onclick="refreshStatus()">Aggiorna elenco</button></div>
-<div id="projectManagement"><div class="grid"><div><h3>Nuovo progetto</h3><label for="newProjectName">Nome cartella</label><input id="newProjectName" placeholder="mio-progetto"><label class="inline-check"><input id="initializeGit" type="checkbox" checked> Inizializza Git</label><div class="actions"><button class="success" onclick="createProject()">Crea e apri</button></div></div><div><h3>Clona da Git</h3><label for="cloneRepository">URL repository</label><input id="cloneRepository" placeholder="https://github.com/owner/repository.git"><label for="cloneProjectName">Nome cartella opzionale</label><input id="cloneProjectName"><div class="actions"><button class="success" onclick="cloneProject()">Clona e apri</button></div></div></div></div><div id="projectResult" class="feedback"></div></div></details></section>
-<section class="hero"><h1>Cosa vuoi fare oggi?</h1><p>Segui i tre passaggi. Le funzioni tecniche restano disponibili, ma non intralciano il flusso principale.</p></section>
+<div id="projectManagement"><div class="grid"><div><h3>Nuovo progetto</h3><label for="newProjectName">Nome cartella</label><input id="newProjectName" placeholder="mio-progetto"><label class="switch-row" for="initializeGit"><input id="initializeGit" type="checkbox" checked><span class="switch-track" aria-hidden="true"></span><span>Inizializza Git</span></label><div class="actions"><button class="success" onclick="createProject()">Crea e apri</button></div></div><div><h3>Clona da Git</h3><label for="cloneRepository">URL repository</label><input id="cloneRepository" placeholder="https://github.com/owner/repository.git"><label for="cloneProjectName">Nome cartella opzionale</label><input id="cloneProjectName"><div class="actions"><button class="success" onclick="cloneProject()">Clona e apri</button></div></div></div></div><div id="projectResult" class="feedback"></div></div></details></section>
+<section class="hero"><div><p class="eyebrow">Workspace locale, controllo totale</p><h1>Cosa vuoi fare oggi?</h1><p>Prepara la richiesta, scambia i file con la tua AI e applica le modifiche solo dopo averle verificate.</p></div><div class="flow-pills" aria-label="Flusso in tre passaggi"><span>1 · Richiesta</span><span>2 · File</span><span>3 · Applica</span></div></section>
 {task_step}{export_step}{update_step}
+<section class="card github-simple-card"><div class="step-head"><span class="step-number">G</span><div><p class="eyebrow">Pubblicazione semplice</p><h2>GitHub in un clic</h2><p>Al primo utilizzo crea il repository; dopo, pubblica automaticamente gli aggiornamenti.</p></div></div><div class="status-strip"><div><span class="muted">Stato GitHub</span><div id="githubSimpleStatus" class="project-name">Controllo in corso…</div></div></div><div class="grid"><div><label id="githubRepoLabel" for="githubRepoName">Nome nuova repository GitHub</label><input id="githubRepoName" placeholder="nome-nuova-repository"><p id="githubRepoHelp" class="field-help">Verrà usato solo per creare la repository del progetto corrente.</p></div><div><label for="githubVisibility">Visibilità della nuova repository</label><select id="githubVisibility"><option value="private">Privato</option><option value="public">Pubblico</option></select></div></div><div class="actions"><button id="githubSimpleButton" class="success" onclick="simpleGithubAction()">Crea repository e pubblica</button><button id="githubOpenButton" class="secondary" onclick="openGithubRepository()" disabled>Apri repository</button></div><div id="githubSimpleResult" class="feedback"></div></section>
 <section class="card advanced-card"><details id="verificationTools"><summary>Verifica e strumenti avanzati</summary><div class="details-body"><p class="muted">Usa questi comandi dopo l’applicazione o per la manutenzione del progetto.</p><div class="actions"><button class="success" onclick="runTool('/api/tests','Test completati')">Esegui test</button><button class="secondary" onclick="runTool('/api/git/status','Git status completato')">Git status</button><button class="secondary" onclick="runTool('/api/git/diff','Git diff completato')">Git diff</button><button class="danger" onclick="rollback()">Rollback ultimo batch</button><button class="danger" onclick="restartProgram()">Riavvia BridgAI</button></div><div id="toolResult" class="feedback"></div></div></details></section>
 </div></main><script>{script}</script></body></html>"""

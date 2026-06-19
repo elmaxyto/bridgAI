@@ -87,6 +87,22 @@ def test_i18n_catalog_falls_back_to_source_text() -> None:
     configure_language("it")
 
 
+def test_gemini_beta_warning_is_translated() -> None:
+    from local_ai_bridge.i18n import configure_language, tr
+
+    source = (
+        "Modalità Gemini — Beta: questa integrazione è ancora in fase di perfezionamento e "
+        "potrebbe non funzionare correttamente. Gemini può avere difficoltà a restituire patch "
+        "complete e codice applicabile; controlla sempre con attenzione l’anteprima prima di "
+        "applicare le modifiche."
+    )
+    configure_language("en")
+    translated = tr(source)
+    assert translated.startswith("Gemini mode — Beta:")
+    assert "may not work correctly" in translated
+    configure_language("it")
+
+
 def test_gemini_drive_warning_is_shown_only_when_disabled() -> None:
     from local_ai_bridge.ui.workflow_actions import gemini_drive_warning_required
 
@@ -106,6 +122,13 @@ def test_simple_mode_is_backward_compatible(tmp_path: Path) -> None:
     store.path = tmp_path / "settings.json"
     store.path.write_text('{"last_workspace": "C:/workspace"}', encoding="utf-8")
     assert store.load().simple_mode is True
+
+
+def test_web_auto_start_round_trip(tmp_path: Path) -> None:
+    store = SettingsStore()
+    store.path = tmp_path / "settings.json"
+    store.save(AppSettings(web_auto_start=True))
+    assert store.load().web_auto_start is True
 
 
 def test_external_ai_and_manual_web_defaults_are_backward_compatible(tmp_path: Path) -> None:
@@ -236,3 +259,76 @@ def test_web_credentials_round_trip_without_plaintext_password(tmp_path: Path) -
     assert loaded.web_username == "admin"
     assert loaded.web_password_hash == password_hash
     assert "a sufficiently long password" not in store.path.read_text(encoding="utf-8")
+
+
+def test_settings_tab_uses_scrollable_content() -> None:
+    from local_ai_bridge.ui.tabs import settings as settings_tab
+
+    source = Path(settings_tab.__file__).read_text(encoding="utf-8")
+    function_source = source[source.index("def build_settings_tab"):]
+    assert "QScrollArea()" in function_source
+    assert "setWidgetResizable(True)" in function_source
+    assert "setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)" in function_source
+    assert "scroll_area.setWidget(content)" in function_source
+
+
+def test_settings_theme_styles_scroll_content_and_group_titles() -> None:
+    from local_ai_bridge.ui.theme import application_style
+
+    for dark in (False, True):
+        style = application_style(dark)
+        assert "QScrollArea#settingsScrollArea" in style
+        assert "QWidget#settingsScrollContent" in style
+        assert "QGroupBox::title" in style
+
+
+def test_custom_prompt_settings_round_trip(tmp_path: Path) -> None:
+    store = SettingsStore()
+    store.path = tmp_path / "settings.json"
+    store.save(AppSettings(include_custom_prompts=False, global_prompt="Use typed Python."))
+    loaded = store.load()
+    assert loaded.include_custom_prompts is False
+    assert loaded.global_prompt == "Use typed Python."
+
+
+def test_custom_prompt_settings_are_backward_compatible(tmp_path: Path) -> None:
+    store = SettingsStore()
+    store.path = tmp_path / "settings.json"
+    store.path.write_text('{"language": "it"}', encoding="utf-8")
+    loaded = store.load()
+    assert loaded.include_custom_prompts is True
+    assert loaded.global_prompt == ""
+
+
+def test_project_prompt_round_trip_preserves_other_metadata(tmp_path: Path) -> None:
+    from local_ai_bridge.core.project_prompts import load_project_prompt, save_project_prompt
+
+    metadata = tmp_path / ".bridgai" / "project.json"
+    metadata.parent.mkdir()
+    metadata.write_text('{"other": true}', encoding="utf-8")
+    save_project_prompt(tmp_path, "  Prefer service modules.  ")
+    assert load_project_prompt(tmp_path) == "Prefer service modules."
+    assert '"other": true' in metadata.read_text(encoding="utf-8")
+
+
+def test_project_ignore_round_trip(tmp_path: Path) -> None:
+    from local_ai_bridge.core.project_prompts import load_project_ignore, save_project_ignore
+
+    saved = save_project_ignore(tmp_path, "dist/\r\n*.sqlite")
+    assert saved == tmp_path / ".bridgai" / "ignore"
+    assert load_project_ignore(tmp_path) == "dist/\n*.sqlite\n"
+
+
+def test_markdown_exchange_mode_round_trip(tmp_path: Path) -> None:
+    store = SettingsStore()
+    store.path = tmp_path / "settings.json"
+    store.save(AppSettings(markdown_exchange_mode=True))
+    assert store.load().markdown_exchange_mode is True
+
+
+def test_markdown_exchange_mode_is_backward_compatible(tmp_path: Path) -> None:
+    store = SettingsStore()
+    store.path = tmp_path / "settings.json"
+    store.path.write_text('{"last_workspace": "C:/workspace"}', encoding="utf-8")
+    assert store.load().markdown_exchange_mode is False
+

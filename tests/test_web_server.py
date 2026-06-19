@@ -8,6 +8,8 @@ from pathlib import Path
 
 from local_ai_bridge.web.server import BridgeHTTPServer, BridgeState
 from local_ai_bridge.web.page import render_index
+from local_ai_bridge.core.models import ChangePlan, FileChange
+from local_ai_bridge.services.pre_apply import build_pre_apply_summary
 
 
 def _request(url: str, method: str = "GET", payload: dict | None = None, csrf: str | None = None):
@@ -123,3 +125,81 @@ def test_web_page_uses_guided_simple_workflow() -> None:
     assert "Verifica e strumenti avanzati" in page
     assert "5. Verifica" not in page
     assert "4. Analizza la modifica restituita" not in page
+
+
+def test_web_github_card_distinguishes_new_and_linked_repository() -> None:
+    page = render_index("csrf", "1.0.0")
+
+    assert 'id="githubRepoLabel"' in page
+    assert "Nome nuova repository GitHub" in page
+    assert 'placeholder="nome-nuova-repository"' in page
+    assert "Repository GitHub collegata" in page
+    assert "data.repository_name" in page
+    assert "data.suggested_repository_name" in page
+    assert "workspaceChanged" in page
+    assert "Crea repository e pubblica" in page
+    assert "Pubblica aggiornamenti" in page
+    assert 'placeholder="nome-progetto"' not in page
+
+
+def test_web_zip_upload_streams_selected_file_without_array_buffer() -> None:
+    page = render_index("csrf", "1.0.0")
+
+    assert "body:file" in page
+    assert "file.arrayBuffer()" not in page
+    assert "Upload non riuscito" in page
+
+
+def test_web_checkbox_is_rendered_as_accessible_switch() -> None:
+    page = render_index("csrf", "1.0.0")
+
+    assert 'id="initializeGit" type="checkbox" checked' in page
+    assert 'class="switch-track"' in page
+    assert '.switch-row input:checked+.switch-track' in page
+    assert '.inline-check' not in page
+
+
+def test_web_page_exposes_prompt_presets() -> None:
+    page = render_index("csrf", "1.0.0")
+    assert 'id="promptPreset"' in page
+    assert 'value="debug"' in page
+    assert "Debug guidato" in page
+    assert "preset_id" in page
+
+
+def test_pre_apply_summary_reports_risks_and_available_tests(tmp_path: Path) -> None:
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "sample.py").write_text("print('ok')\n", encoding="utf-8")
+    plan = ChangePlan(
+        plan_type="zip",
+        workspace=tmp_path,
+        source_path=tmp_path / "update.zip",
+        changes=[
+            FileChange("a.py", "a.py", "create", None, "new", size=10),
+            FileChange("image.png", "image.png", "binary", "old", "new", size=20),
+            FileChange("old.py", "old.py", "delete", "old", None),
+        ],
+        diff="",
+        warnings=["Controllare il file binario"],
+        metadata={"commit_message": "feat: update"},
+    )
+
+    summary = build_pre_apply_summary(plan)
+
+    assert summary["total"] == 3
+    assert summary["created"] == 1
+    assert summary["deleted"] == 1
+    assert summary["binary"] == 1
+    assert summary["has_commit_message"] is True
+    assert summary["warning_count"] == 1
+    assert summary["origin"] == "zip: update.zip"
+    assert "Python compileall" in summary["tests"]
+
+
+def test_web_page_renders_pre_apply_checklist() -> None:
+    page = render_index("csrf", "1.0.0")
+
+    assert 'id="preApplyChecklist"' in page
+    assert "Checklist pre-applicazione" in page
+    assert "data.pre_apply" in page
+    assert "Hai controllato la checklist pre-applicazione?" in page

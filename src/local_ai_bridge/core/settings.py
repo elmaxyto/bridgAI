@@ -24,6 +24,8 @@ class AppSettings:
     last_workspace: str = ""
     simple_mode: bool = DEFAULT_SIMPLE_MODE
     dark_mode: bool = False
+    include_custom_prompts: bool = True
+    global_prompt: str = ""
     chatgpt_url: str = "https://chatgpt.com/"
     claude_url: str = "https://claude.ai/"
     grok_url: str = "https://grok.com/"
@@ -31,6 +33,7 @@ class AppSettings:
     update_zip_directory: str = ""
     gemini_drive_enabled: bool = False
     gemini_drive_path: str = ""
+    markdown_exchange_mode: bool = False
     web_auto_start: bool = False
     web_open_browser: bool = True
     web_port: int = 8765
@@ -49,9 +52,6 @@ class SettingsStore:
         try:
             data = json.loads(self.path.read_text(encoding="utf-8"))
             values = {k: v for k, v in data.items() if k in AppSettings.__annotations__}
-            # The desktop app must never start the local web interface implicitly.
-            # Keep reading the legacy field for compatibility, but force manual startup.
-            values["web_auto_start"] = False
             return AppSettings(**values)
         except Exception:
             return AppSettings()

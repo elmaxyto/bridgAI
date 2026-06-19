@@ -43,19 +43,31 @@ def managed_subdir(configured: str | Path | None, name: str) -> Path:
     return path
 
 
-def latest_zip_file(directory: str | Path | None) -> Path | None:
+def _latest_file_with_suffixes(
+    directory: str | Path | None,
+    suffixes: set[str],
+) -> Path | None:
     if not directory:
         return None
     folder = Path(directory).expanduser()
     if not folder.is_dir():
         return None
+    normalized = {suffix.casefold() for suffix in suffixes}
     candidates = [
         path for path in folder.iterdir()
-        if path.is_file() and path.suffix.lower() == ".zip"
+        if path.is_file() and path.suffix.casefold() in normalized
     ]
     if not candidates:
         return None
-    return max(candidates, key=lambda path: (path.stat().st_mtime_ns, path.name.lower()))
+    return max(candidates, key=lambda path: (path.stat().st_mtime_ns, path.name.casefold()))
+
+
+def latest_zip_file(directory: str | Path | None) -> Path | None:
+    return _latest_file_with_suffixes(directory, {".zip"})
+
+
+def latest_markdown_file(directory: str | Path | None) -> Path | None:
+    return _latest_file_with_suffixes(directory, {".md", ".markdown"})
 
 
 def stage_import_zip(source: Path, configured: str | Path | None) -> Path:

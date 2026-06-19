@@ -47,6 +47,75 @@ MAX_DISCOVERED_DIRS = 2_000
 MAX_SCAN_DEPTH = 40
 DEFAULT_SCAN_BUDGET_SECONDS = 45.0
 CANDIDATE_SCAN_BUDGET_SECONDS = 15.0
+PROJECT_IGNORE_FILE = ".bridgai/ignore"
+
+
+@dataclass(frozen=True, slots=True)
+class ProjectIgnoreRules:
+    """Project-local exclusions used only while building scanner/report context."""
+
+    patterns: tuple[str, ...] = ()
+
+    @classmethod
+    def load(cls, root: Path) -> "ProjectIgnoreRules":
+        path = root / PROJECT_IGNORE_FILE
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return cls()
+
+        patterns: list[str] = []
+        for raw_line in text.splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#"):
+                continue
+            normalized = line.replace("\\", "/")
+            while normalized.startswith("./"):
+                normalized = normalized[2:]
+            if normalized:
+                patterns.append(normalized)
+        return cls(tuple(patterns))
+
+    def matches(self, relative: str, *, is_dir: bool = False) -> bool:
+        candidate = relative.replace("\\", "/").strip("/")
+        if not candidate:
+            return False
+
+        parts = candidate.split("/")
+        for raw_pattern in self.patterns:
+            directory_only = raw_pattern.endswith("/")
+            pattern = raw_pattern.rstrip("/")
+            if not pattern:
+                continue
+
+            anchored = raw_pattern.startswith("/")
+            pattern = pattern.lstrip("/")
+            if directory_only:
+                if self._directory_match(candidate, parts, pattern, anchored):
+                    return True
+                continue
+
+            recursive_base = pattern[:-3].rstrip("/") if pattern.endswith("/**") else ""
+            if recursive_base and (candidate == recursive_base or candidate.startswith(recursive_base + "/")):
+                return True
+
+            if "/" in pattern or anchored:
+                if fnmatch.fnmatchcase(candidate, pattern):
+                    return True
+            elif any(fnmatch.fnmatchcase(part, pattern) for part in parts):
+                return True
+        return False
+
+    @staticmethod
+    def _directory_match(candidate: str, parts: list[str], pattern: str, anchored: bool) -> bool:
+        if "/" in pattern or anchored:
+            prefixes = ["/".join(parts[:index]) for index in range(1, len(parts) + 1)]
+            return any(fnmatch.fnmatchcase(prefix, pattern) for prefix in prefixes)
+        return any(fnmatch.fnmatchcase(part, pattern) for part in parts)
+
+
+def load_project_ignore(root: Path) -> ProjectIgnoreRules:
+    return ProjectIgnoreRules.load(root)
 
 
 class ScanBudgetExceeded(RuntimeError):
@@ -84,16 +153,21 @@ def _relative_posix(root: Path, path: Path) -> str:
     return path.relative_to(root).as_posix()
 
 
-def _allowed_dir(root: Path, current: Path, name: str) -> bool:
+def _allowed_dir(root: Path, current: Path, name: str, ignore: ProjectIgnoreRules) -> bool:
     if name.casefold() in EXCLUDED_DIRS_CASEFOLD:
         return False
     relative = _relative_posix(root, current / name)
-    return not is_sensitive_relative_path(relative)
+    return not is_sensitive_relative_path(relative) and not ignore.matches(relative, is_dir=True)
 
 
-def _allowed_file(root: Path, path: Path) -> bool:
+def _allowed_file(root: Path, path: Path, ignore: ProjectIgnoreRules) -> bool:
     relative = _relative_posix(root, path)
-    return not is_sensitive_relative_path(relative) and not is_generated_report(relative)
+    return (
+        relative != PROJECT_IGNORE_FILE
+        and not is_sensitive_relative_path(relative)
+        and not is_generated_report(relative)
+        and not ignore.matches(relative)
+    )
 
 
 def _is_reparse_or_link(entry: os.DirEntry[str]) -> bool:
@@ -114,7 +188,9 @@ def _is_reparse_or_link(entry: os.DirEntry[str]) -> bool:
     return bool(reparse_flag and file_attributes & reparse_flag)
 
 
-def _safe_entries(root: Path, directory: Path, deadline: float) -> list[tuple[Path, bool]]:
+def _safe_entries(
+    root: Path, directory: Path, deadline: float, ignore: ProjectIgnoreRules
+) -> list[tuple[Path, bool]]:
     _check_deadline(deadline)
     items: list[tuple[Path, bool]] = []
     try:
@@ -130,16 +206,18 @@ def _safe_entries(root: Path, directory: Path, deadline: float) -> list[tuple[Pa
                 except OSError:
                     continue
                 if is_dir:
-                    if _allowed_dir(root, directory, entry.name):
+                    if _allowed_dir(root, directory, entry.name, ignore):
                         items.append((path, True))
-                elif is_file and _allowed_file(root, path):
+                elif is_file and _allowed_file(root, path, ignore):
                     items.append((path, False))
     except OSError:
         return []
     return sorted(items, key=lambda item: (not item[1], item[0].name.casefold()))
 
 
-def _walk_project_files(root: Path, deadline: float) -> Iterator[tuple[Path, str]]:
+def _walk_project_files(
+    root: Path, deadline: float, ignore: ProjectIgnoreRules
+) -> Iterator[tuple[Path, str]]:
     stack: list[tuple[Path, int]] = [(root, 0)]
     directories_seen = 0
     files_seen = 0
@@ -151,7 +229,7 @@ def _walk_project_files(root: Path, deadline: float) -> Iterator[tuple[Path, str
         directories_seen += 1
         if directories_seen > MAX_DISCOVERED_DIRS:
             raise ScanBudgetExceeded("limite massimo di directory raggiunto")
-        entries = _safe_entries(root, directory, deadline)
+        entries = _safe_entries(root, directory, deadline, ignore)
         child_dirs: list[Path] = []
         for path, is_dir in entries:
             if is_dir:
@@ -167,10 +245,13 @@ def _walk_project_files(root: Path, deadline: float) -> Iterator[tuple[Path, str
 
 def iter_project_files(root: Path, time_budget: float = DEFAULT_SCAN_BUDGET_SECONDS):
     """Yield safe project files without following links or junctions."""
-    yield from _walk_project_files(root, _deadline(time_budget))
+    ignore = load_project_ignore(root)
+    yield from _walk_project_files(root, _deadline(time_budget), ignore)
 
 
-def _tree(root: Path, deadline: float) -> tuple[str, bool]:
+def _tree(
+    root: Path, deadline: float, ignore: ProjectIgnoreRules
+) -> tuple[str, bool]:
     rows = [f"{root.name}/"]
     count = 0
     truncated = False
@@ -182,7 +263,7 @@ def _tree(root: Path, deadline: float) -> tuple[str, bool]:
             rows.append(prefix + "└── ... [profondità massima raggiunta]")
             truncated = True
             return True
-        entries = _safe_entries(root, directory, deadline)
+        entries = _safe_entries(root, directory, deadline, ignore)
         for index, (entry, is_dir) in enumerate(entries):
             _check_deadline(deadline)
             count += 1
@@ -212,8 +293,9 @@ def rank_task_candidates(root: Path, task: str, limit: int = 12) -> list[str]:
     if not tokens:
         return []
     scored: list[tuple[int, str]] = []
+    ignore = load_project_ignore(root)
     try:
-        files = iter_project_files(root, CANDIDATE_SCAN_BUDGET_SECONDS)
+        files = _walk_project_files(root, _deadline(CANDIDATE_SCAN_BUDGET_SECONDS), ignore)
         for path, relative in files:
             if path.suffix.lower() not in SUPPORTED_EXTENSIONS and path.name not in SPECIAL_FILES:
                 continue
@@ -238,9 +320,10 @@ def scan_project(root: Path, time_budget: float = DEFAULT_SCAN_BUDGET_SECONDS) -
     diagnostics: list[str] = []
     scanned = skipped = 0
     deadline = _deadline(time_budget)
+    ignore = load_project_ignore(root)
 
     try:
-        files = list(_walk_project_files(root, deadline))
+        files = list(_walk_project_files(root, deadline, ignore))
     except ScanBudgetExceeded as exc:
         files = []
         diagnostics.append(f"Scansione filesystem interrotta in sicurezza: {exc}.")
@@ -294,7 +377,7 @@ def scan_project(root: Path, time_budget: float = DEFAULT_SCAN_BUDGET_SECONDS) -
         icon = "🔥" if loc >= 350 else "⚠️" if loc >= 300 else "🛠️"
         hot_rows.append(f"- {icon} `{relative}` ({loc} LOC)")
 
-    tree, tree_truncated = _tree(root, _deadline(min(15.0, time_budget)))
+    tree, tree_truncated = _tree(root, _deadline(min(15.0, time_budget)), ignore)
     if tree_truncated:
         diagnostics.append("Albero del progetto troncato in sicurezza per limite di tempo o dimensione.")
 

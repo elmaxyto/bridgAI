@@ -36,6 +36,18 @@ BridgAI è stato sviluppato in modo iterativo usando BridgAI stesso. La prima ve
 
 Questa esperienza costituisce una validazione end-to-end concreta del caso d’uso principale dell’applicazione. Integra, ma non sostituisce, i test automatici ripetibili.
 
+## Esclusioni locali dal report
+
+Crea `.bridgai/ignore` nel workspace per omettere dal Super-Report file di progetto rumorosi senza modificare `.gitignore`. Usa un glob per riga; le righe vuote e quelle che iniziano con `#` vengono ignorate. Esempio:
+
+```text
+dist/
+*.sqlite
+docs/generated/**
+```
+
+Le regole agiscono soltanto sul contesto dello scanner/report, compresi albero, riepiloghi, file candidati e note prioritarie. Non indeboliscono i controlli sui percorsi sensibili e non modificano la sicurezza di ZIP, patch, applicazione o accesso al filesystem.
+
 ## Modello di sicurezza
 
 - Il programma locale è l'unica autorità sul filesystem.
@@ -210,3 +222,9 @@ Consulta [CHANGELOG.md](CHANGELOG.md) e i documenti storici `AGGIORNAMENTO_*.md`
 ## Licenza
 
 BridgAI è distribuito con licenza [MIT](LICENSE).
+
+### Prompt globale e prompt per progetto
+
+Nella scheda **Impostazioni** puoi salvare istruzioni persistenti da includere nel Super-Report. Il prompt globale vale per tutti i workspace; il prompt del progetto corrente viene salvato in `.bridgai/project.json`. Un interruttore permette di escludere temporaneamente entrambe le istruzioni dal report senza cancellarle.
+
+Le istruzioni personalizzate e l’editor di `.bridgai/ignore` sono disponibili nella scheda **Avanzato**. Le impostazioni già salvate continuano a essere applicate anche quando l’interfaccia è in modalità super semplice, ma non sono modificabili da quel flusso.

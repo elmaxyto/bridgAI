@@ -418,9 +418,15 @@ def inspect_gemini_response(workspace: Path, text: str) -> ChangePlan:
     )
 
 
-def inspect_full_file(workspace: Path, target_relative: str, content: str) -> ChangePlan:
+def inspect_full_file(
+    workspace: Path,
+    target_relative: str,
+    content: str,
+    *,
+    strip_fence: bool = True,
+) -> ChangePlan:
     target = resolve_workspace_target(workspace, target_relative, allow_missing=True)
-    clean = strip_outer_fence(content)
+    clean = strip_outer_fence(content) if strip_fence else content
     new_bytes = clean.encode("utf-8")
     if target.suffix.lower() == ".py":
         compile(clean, target_relative, "exec")

@@ -7,8 +7,13 @@ from pathlib import Path
 
 from local_ai_bridge import __version__
 from local_ai_bridge.core.safety import is_sensitive_relative_path
-from local_ai_bridge.core.settings import app_data_dir
-from local_ai_bridge.services.project_scanner import rank_task_candidates, scan_project
+from local_ai_bridge.core.project_prompts import load_project_prompt
+from local_ai_bridge.core.settings import AppSettings, SettingsStore, app_data_dir
+from local_ai_bridge.services.project_scanner import (
+    load_project_ignore,
+    rank_task_candidates,
+    scan_project,
+)
 
 
 NOTE_FILES = (
@@ -51,9 +56,14 @@ def _git_snapshot(root: Path) -> str:
 
 def _notes(root: Path) -> str:
     chunks: list[str] = []
+    ignore = load_project_ignore(root)
     for name in NOTE_FILES:
         path = root / name
-        if path.is_file() and not is_sensitive_relative_path(name):
+        if (
+            path.is_file()
+            and not is_sensitive_relative_path(name)
+            and not ignore.matches(name)
+        ):
             try:
                 text = path.read_text(encoding="utf-8", errors="replace")[:MAX_NOTES_PER_FILE]
             except OSError:
@@ -61,6 +71,20 @@ def _notes(root: Path) -> str:
             chunks.append(f"### `{name}`\n```text\n{text}\n```")
     return "\n\n".join(chunks) if chunks else "_Nessuna nota locale prioritaria rilevata._"
 
+
+
+def _custom_instructions(root: Path, settings: AppSettings | None = None) -> str:
+    settings = settings or SettingsStore().load()
+    if not settings.include_custom_prompts:
+        return "_Inclusione disabilitata nelle impostazioni._"
+    chunks: list[str] = []
+    global_prompt = settings.global_prompt.strip()
+    project_prompt = load_project_prompt(root).strip()
+    if global_prompt:
+        chunks.append(f"### Prompt globale\n\n{global_prompt}")
+    if project_prompt:
+        chunks.append(f"### Prompt del progetto\n\n{project_prompt}")
+    return "\n\n".join(chunks) if chunks else "_Nessuna istruzione personalizzata configurata._"
 
 def _candidate_section(root: Path, task: str) -> str:
     if not task.strip():
@@ -140,6 +164,7 @@ def build_super_report(root: Path, task: str = "") -> str:
         )
         git_text = _git_snapshot(root)
         notes_text = _notes(root)
+        custom_instructions = _custom_instructions(root)
         elapsed = time.monotonic() - started
         _trace_report(f"RENDER elapsed={elapsed:.2f}s")
 
@@ -158,6 +183,10 @@ def build_super_report(root: Path, task: str = "") -> str:
 ## 1. Obiettivo corrente
 
 {task_text}
+
+## 1.1 Istruzioni personalizzate
+
+{custom_instructions}
 
 ## 2. Ruolo dell'AI esterna
 

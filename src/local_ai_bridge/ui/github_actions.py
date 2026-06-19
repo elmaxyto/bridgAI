@@ -5,10 +5,149 @@ from PySide6.QtCore import QUrl
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import QInputDialog, QLineEdit, QMessageBox
 from local_ai_bridge.services.git import git_remote_url, push_current_branch
-from local_ai_bridge.services.github import GitHubRepository, connect_github_repository, create_github_repository, github_auth_status, github_cli_available, github_login_command, github_setup_git, github_switch_account, list_github_accounts, list_github_repositories
+from local_ai_bridge.services.github import GitHubRepository, connect_github_repository, create_github_repository, github_auth_status, github_cli_available, github_login_command, github_setup_git, github_switch_account, list_github_accounts, list_github_repositories, publish_or_update_github, simple_github_status
 from local_ai_bridge.ui.command_dialog import InteractiveCommandDialog
 
 class GitHubActionsMixin:
+
+    def refresh_publication_tab(self) -> None:
+        status_label = getattr(self, 'publication_changes_status', None)
+        if status_label is None:
+            return
+        workspace = getattr(self, 'workspace', None)
+        if workspace is None:
+            self.publication_account_status.setText(_('Nessun progetto selezionato'))
+            self.publication_repository_status.setText('—')
+            self.publication_changes_status.setText(_('Apri o crea un progetto per continuare.'))
+            self.publication_primary_button.setEnabled(False)
+            self.publication_open_button.setEnabled(False)
+            self.publication_create_group.setVisible(False)
+            return
+        try:
+            status = simple_github_status(workspace)
+        except Exception as exc:
+            self.publication_changes_status.setText(str(exc))
+            self.publication_primary_button.setEnabled(False)
+            return
+        cli_ready = bool(status.get('github_cli_available'))
+        self.publication_account_status.setText(_('Pronto') if cli_ready else _('GitHub CLI non installata'))
+        published = bool(status.get('published'))
+        repository_url = str(status.get('repository_url') or '')
+        self.publication_repository_status.setText(repository_url or _('Non collegata'))
+        self.publication_open_button.setEnabled(bool(repository_url))
+        self.publication_create_group.setVisible(not published)
+        self.publication_repo_name.setEnabled(not published)
+        self.publication_visibility.setEnabled(not published)
+        if not self.publication_repo_name.text().strip():
+            self.publication_repo_name.setText(workspace.name)
+        change_count = int(status.get('change_count') or 0)
+        if published:
+            self.publication_primary_button.setText(
+                _('Pubblica {count} modifiche su GitHub').format(count=change_count)
+                if change_count else _('Il progetto su GitHub è già aggiornato')
+            )
+            self.publication_changes_status.setText(
+                _('{count} modifiche locali non ancora pubblicate').format(count=change_count)
+                if change_count else _('Tutte le modifiche locali sono già pubblicate su GitHub.')
+            )
+        else:
+            self.publication_primary_button.setText(_('Pubblica il progetto su GitHub'))
+            self.publication_changes_status.setText(_('Il progetto non è ancora pubblicato.'))
+        self.publication_primary_button.setEnabled(cli_ready and (not published or change_count > 0))
+
+    def publish_from_publication_tab(self) -> None:
+        workspace = self._require_workspace()
+        if workspace is None or not self._ensure_github_cli():
+            return
+        try:
+            status = simple_github_status(workspace)
+        except Exception as exc:
+            QMessageBox.warning(self, _('GitHub'), str(exc))
+            return
+        repository_name = self.publication_repo_name.text().strip() or workspace.name
+        visibility = str(self.publication_visibility.currentData() or 'private')
+        if status['published']:
+            count = int(status['change_count'])
+            if count <= 0:
+                QMessageBox.information(self, _('GitHub'), _('Tutte le modifiche locali sono già pubblicate su GitHub.'))
+                return
+            prompt = _('Pubblicare {count} modifiche locali sul progetto GitHub collegato?').format(count=count)
+        else:
+            label = _('pubblica') if visibility == 'public' else _('privata')
+            prompt = _('Creare la repository “{name}” come {visibility} e pubblicare il progetto?').format(
+                name=repository_name, visibility=label
+            )
+        if QMessageBox.question(self, _('Conferma pubblicazione'), prompt, QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes) != QMessageBox.Yes:
+            return
+        self.publication_primary_button.setEnabled(False)
+        self._run_background(
+            lambda: publish_or_update_github(
+                workspace,
+                repository_name=repository_name,
+                visibility=visibility,
+                session_manager=self.session_manager,
+            ),
+            self._publication_tab_finished,
+            _('Pubblicazione su GitHub...'),
+        )
+
+    def _publication_tab_finished(self, result: dict) -> None:
+        self._simple_github_finished(result)
+        self.refresh_publication_tab()
+
+    def _show_tool_output_and_refresh_publication(self, output: str) -> None:
+        self._show_tool_output(output)
+        self.refresh_publication_tab()
+
+    def simple_github_action(self) -> None:
+        workspace = self._require_workspace()
+        if workspace is None or not self._ensure_github_cli():
+            return
+        try:
+            status = simple_github_status(workspace)
+        except Exception as exc:
+            QMessageBox.warning(self, _('GitHub'), str(exc))
+            return
+        visibility = 'private'
+        repository_name = workspace.name
+        if not status['published']:
+            visibility = self._ask_repository_visibility()
+            if visibility is None:
+                return
+            repository_name = self._ask_repository_name(workspace)
+            if repository_name is None:
+                return
+            label = _('pubblico') if visibility == 'public' else _('privato')
+            prompt = f"Pubblicare questo progetto su GitHub come {label}?\n\nBridgAI creerà il repository, preparerà un commit e invierà i file in un solo passaggio."
+        else:
+            count = int(status['change_count'])
+            prompt = f"Aggiornare GitHub con {count} modifica{'he' if count != 1 else ''}?\n\nBridgAI creerà il commit e farà il push automaticamente." if count else "Il progetto sembra già aggiornato. Verificare comunque GitHub?"
+        if QMessageBox.question(self, _('GitHub semplice'), prompt, QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes) != QMessageBox.Yes:
+            return
+        self._run_background(
+            lambda: publish_or_update_github(workspace, repository_name=repository_name, visibility=visibility, session_manager=self.session_manager),
+            self._simple_github_finished,
+            _('Pubblicazione su GitHub...'),
+        )
+
+    def _simple_github_finished(self, result: dict) -> None:
+        message = str(result.get('message') or _('Operazione completata.'))
+        url = result.get('repository_url')
+        details = str(result.get('output') or '')
+        self._show_tool_output(message + ('\n\n' + details if details else ''))
+        if url and QMessageBox.question(self, _('GitHub aggiornato'), message + '\n\nAprire il repository nel browser?', QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes) == QMessageBox.Yes:
+            QDesktopServices.openUrl(QUrl(str(url)))
+
+    def open_github_repository(self) -> None:
+        workspace = self._require_workspace()
+        if workspace is None:
+            return
+        status = simple_github_status(workspace)
+        url = status.get('repository_url')
+        if not url:
+            QMessageBox.information(self, _('GitHub'), _('Questo progetto non è ancora pubblicato su GitHub.'))
+            return
+        QDesktopServices.openUrl(QUrl(str(url)))
 
     def show_github_status(self) -> None:
         self._run_background(github_auth_status, self._show_tool_output, _('Verifica account GitHub...'))
@@ -20,7 +159,7 @@ class GitHubActionsMixin:
         dialog = InteractiveCommandDialog(_('Aggiungi account GitHub'), program, arguments, "Segui il flusso mostrato qui sotto. GitHub CLI aprirà il browser per autorizzare l'account e conserverà le credenziali fuori dal workspace. Se compare una domanda, scrivi la risposta nel campo in basso.", self)
         dialog.exec()
         if dialog.exit_code == 0:
-            self._run_background(github_setup_git, self._show_tool_output, _('Configurazione credenziali Git...'))
+            self._run_background(github_setup_git, self._show_tool_output_and_refresh_publication, _('Configurazione credenziali Git...'))
 
     def switch_github_account(self) -> None:
         if not self._ensure_github_cli():
@@ -84,7 +223,7 @@ class GitHubActionsMixin:
         replace = self._confirm_remote_link(workspace, repository)
         if replace is None:
             return
-        self._run_background(lambda: connect_github_repository(workspace, repository, replace_existing=replace), self._show_tool_output, _('Collegamento repository GitHub...'))
+        self._run_background(lambda: connect_github_repository(workspace, repository, replace_existing=replace), self._show_tool_output_and_refresh_publication, _('Collegamento repository GitHub...'))
 
     def _confirm_remote_link(self, workspace: Path, repository: str) -> bool | None:
         existing = git_remote_url(workspace, 'origin')

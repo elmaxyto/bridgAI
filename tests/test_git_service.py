@@ -199,3 +199,58 @@ def test_create_commit_stages_only_after_explicit_call(tmp_path: Path, monkeypat
     assert result == "done"
     assert commands[-2] == ["git", "add", "--all", "--", "."]
     assert commands[-1] == ["git", "commit", "-m", "feat: update app"]
+
+
+
+def test_simple_github_status_reports_publish_or_update(tmp_path: Path, monkeypatch) -> None:
+    (tmp_path / ".git").mkdir()
+    monkeypatch.setattr(github_service, "git_available", lambda: True)
+    monkeypatch.setattr(github_service, "github_cli_available", lambda: True)
+    monkeypatch.setattr(github_service, "git_remote_url", lambda workspace, remote_name="origin": "https://github.com/alice/demo.git")
+    monkeypatch.setattr(github_service, "_current_changes", lambda workspace: [("modify", "src/app.py")])
+    status = github_service.simple_github_status(tmp_path)
+    assert status["published"] is True
+    assert status["action"] == "update"
+    assert status["change_count"] == 1
+    assert status["repository_name"] == "alice/demo"
+    assert status["suggested_repository_name"] == tmp_path.name
+    assert status["repository_url"] == "https://github.com/alice/demo"
+
+
+def test_simple_github_status_suggests_workspace_name_before_first_publish(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setattr(github_service, "git_available", lambda: True)
+    monkeypatch.setattr(github_service, "github_cli_available", lambda: True)
+    monkeypatch.setattr(github_service, "git_remote_url", lambda workspace, remote_name="origin": None)
+    monkeypatch.setattr(github_service, "_current_changes", lambda workspace: [])
+
+    status = github_service.simple_github_status(tmp_path)
+
+    assert status["published"] is False
+    assert status["repository_name"] is None
+    assert status["suggested_repository_name"] == tmp_path.name
+
+
+def test_publish_or_update_creates_commit_repository_and_pushes(tmp_path: Path, monkeypatch) -> None:
+    (tmp_path / ".git").mkdir()
+    remote = {"value": None}
+    calls: list[str] = []
+    monkeypatch.setattr(github_service, "git_available", lambda: True)
+    monkeypatch.setattr(github_service, "github_cli_available", lambda: True)
+    monkeypatch.setattr(github_service, "list_github_accounts", lambda: ["alice"])
+    monkeypatch.setattr(github_service, "_current_changes", lambda workspace: [("modify", "src/app.py")])
+    monkeypatch.setattr(github_service, "generate_commit_message", lambda workspace, session_manager=None: "feat: update app")
+    monkeypatch.setattr(github_service, "create_commit", lambda workspace, message: calls.append("commit") or "ok")
+    monkeypatch.setattr(github_service, "git_has_commits", lambda workspace: True)
+    monkeypatch.setattr(github_service, "git_remote_url", lambda workspace, remote_name="origin": remote["value"])
+    def create_repo(workspace, name, **kwargs):
+        calls.append("create")
+        remote["value"] = "https://github.com/alice/demo.git"
+        return "created"
+    monkeypatch.setattr(github_service, "create_github_repository", create_repo)
+    monkeypatch.setattr(github_service, "push_current_branch", lambda workspace: calls.append("push") or "pushed")
+    result = github_service.publish_or_update_github(tmp_path, repository_name="demo")
+    assert calls == ["commit", "create", "push"]
+    assert result["repository_created"] is True
+    assert result["repository_url"] == "https://github.com/alice/demo"

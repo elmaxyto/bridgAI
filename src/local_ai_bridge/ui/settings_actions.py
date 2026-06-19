@@ -4,6 +4,12 @@ from pathlib import Path
 from PySide6.QtCore import QUrl
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import QFileDialog, QMessageBox
+from local_ai_bridge.core.project_prompts import (
+    load_project_ignore,
+    load_project_prompt,
+    save_project_ignore,
+    save_project_prompt,
+)
 from local_ai_bridge.services.temp_storage import clean_managed_temp, configured_temp_root
 from local_ai_bridge.web.launcher import start_web_interface, stop_web_interface
 from local_ai_bridge.web.security import hash_password
@@ -14,7 +20,7 @@ class SettingsActionsMixin:
         self.settings.dark_mode = bool(enabled)
         self.settings_store.save(self.settings)
         self.apply_theme()
-        self._show_status(_('Modalità scura attivata.') if enabled else _('Modalità chiara attivata.'))
+        self._show_status(_('Tema scuro attivato.') if enabled else _('Tema chiaro attivato.'))
 
     def save_interface_language(self) -> None:
         language = self.language_combo.currentData()
@@ -33,8 +39,65 @@ class SettingsActionsMixin:
             self.restart_application()
 
 
+    def refresh_prompt_settings(self) -> None:
+        self.include_custom_prompts_check.blockSignals(True)
+        self.include_custom_prompts_check.setChecked(self.settings.include_custom_prompts)
+        self.include_custom_prompts_check.blockSignals(False)
+        self.global_prompt_edit.setPlainText(self.settings.global_prompt)
+        project_prompt = load_project_prompt(self.workspace) if self.workspace else ""
+        self.project_prompt_edit.setPlainText(project_prompt)
+        self.project_prompt_edit.setEnabled(self.workspace is not None)
+        self.save_project_prompt_button.setEnabled(self.workspace is not None)
+        project_ignore = load_project_ignore(self.workspace) if self.workspace else ""
+        self.project_ignore_edit.setPlainText(project_ignore)
+        self.project_ignore_edit.setEnabled(self.workspace is not None)
+        self.save_project_ignore_button.setEnabled(self.workspace is not None)
+        self.reload_project_ignore_button.setEnabled(self.workspace is not None)
+
+    def set_custom_prompts_enabled(self, enabled: bool) -> None:
+        self.settings.include_custom_prompts = bool(enabled)
+        self.settings_store.save(self.settings)
+        self._show_status(_('Istruzioni personalizzate abilitate.') if enabled else _('Istruzioni personalizzate disabilitate.'))
+
+    def save_global_prompt(self) -> None:
+        self.settings.global_prompt = self.global_prompt_edit.toPlainText().strip()
+        self.settings_store.save(self.settings)
+        self._show_status(_('Prompt globale salvato.'))
+
+    def save_current_project_prompt(self) -> None:
+        workspace = self._require_workspace()
+        if not workspace:
+            return
+        try:
+            save_project_prompt(workspace, self.project_prompt_edit.toPlainText())
+        except OSError as exc:
+            QMessageBox.critical(self, _('Salvataggio prompt fallito'), str(exc))
+            return
+        self._show_status(_('Prompt del progetto salvato.'))
+
+    def save_current_project_ignore(self) -> None:
+        workspace = self._require_workspace()
+        if not workspace:
+            return
+        try:
+            save_project_ignore(workspace, self.project_ignore_edit.toPlainText())
+        except OSError as exc:
+            QMessageBox.critical(self, _('Salvataggio file esclusi fallito'), str(exc))
+            return
+        self._show_status(_('File esclusi dal Super-Report salvato.'))
+
+    def reload_current_project_ignore(self) -> None:
+        workspace = self._require_workspace()
+        if not workspace:
+            return
+        self.project_ignore_edit.setPlainText(load_project_ignore(workspace))
+        self._show_status(_('File esclusi ricaricato.'))
+
 
     def refresh_web_settings(self) -> None:
+        self.web_auto_start_check.blockSignals(True)
+        self.web_auto_start_check.setChecked(self.settings.web_auto_start)
+        self.web_auto_start_check.blockSignals(False)
         self.web_open_browser_check.blockSignals(True)
         self.web_open_browser_check.setChecked(self.settings.web_open_browser)
         self.web_open_browser_check.blockSignals(False)
@@ -133,7 +196,7 @@ class SettingsActionsMixin:
         self.settings.web_open_browser = self.web_open_browser_check.isChecked()
         self.settings.web_remote_access = remote_access
         self.settings.web_username = username
-        self.settings.web_auto_start = False
+        self.settings.web_auto_start = self.web_auto_start_check.isChecked()
         self.settings_store.save(self.settings)
         return True
 
@@ -193,13 +256,50 @@ class SettingsActionsMixin:
         self.gemini_drive_enabled_check.blockSignals(False)
         self.gemini_drive_path_edit.setText(self.settings.gemini_drive_path)
 
-    def set_gemini_drive_enabled(self, enabled: bool) -> None:
-        self.settings.gemini_drive_enabled = enabled
-        self.settings.gemini_drive_path = self.gemini_drive_path_edit.text().strip()
+    def refresh_markdown_exchange_settings(self) -> None:
+        self.markdown_exchange_mode_check.blockSignals(True)
+        self.markdown_exchange_mode_check.setChecked(self.settings.markdown_exchange_mode)
+        self.markdown_exchange_mode_check.blockSignals(False)
+
+    def set_markdown_exchange_mode(self, enabled: bool) -> None:
+        enabled = bool(enabled)
+        gemini_was_enabled = enabled and self.settings.gemini_drive_enabled
+        self.settings.markdown_exchange_mode = enabled
+        if gemini_was_enabled:
+            self.settings.gemini_drive_enabled = False
+            self.refresh_gemini_drive_settings()
         self.settings_store.save(self.settings)
         self.apply_simple_mode()
-        state = 'abilitata' if enabled else 'disabilitata'
-        self._show_status(f'Modalità Gemini con Google Drive {state}.')
+        if gemini_was_enabled:
+            message = _(
+                'Modalità Markdown Exchange attivata. Gemini è stata disattivata automaticamente.'
+            )
+        else:
+            message = _(
+                'Modalità Markdown Exchange attivata.'
+                if enabled else 'Modalità Markdown Exchange disattivata.'
+            )
+        self._show_status(message)
+
+    def set_gemini_drive_enabled(self, enabled: bool) -> None:
+        enabled = bool(enabled)
+        markdown_was_enabled = enabled and self.settings.markdown_exchange_mode
+        self.settings.gemini_drive_enabled = enabled
+        self.settings.gemini_drive_path = self.gemini_drive_path_edit.text().strip()
+        if markdown_was_enabled:
+            self.settings.markdown_exchange_mode = False
+            self.refresh_markdown_exchange_settings()
+        self.settings_store.save(self.settings)
+        self.apply_simple_mode()
+        if markdown_was_enabled:
+            message = _(
+                'Modalità Gemini attivata. Markdown Exchange è stata disattivata automaticamente.'
+            )
+        else:
+            message = _(
+                'Modalità Gemini attivata.' if enabled else 'Modalità Gemini disattivata.'
+            )
+        self._show_status(message)
 
     def save_gemini_drive_path(self) -> None:
         path = self.gemini_drive_path_edit.text().strip()

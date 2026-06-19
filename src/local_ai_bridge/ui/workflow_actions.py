@@ -6,13 +6,18 @@ from PySide6.QtCore import QUrl
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import QApplication, QFileDialog, QMessageBox
 from local_ai_bridge.services.exporting import parse_download_requests
+from local_ai_bridge.services.markdown_exchange import (
+    export_files_to_markdown,
+    parse_markdown_response,
+)
+from local_ai_bridge.core.prompt_presets import compose_task_with_preset
 from local_ai_bridge.services.patching import (
     inspect_full_file,
     inspect_gemini_response,
     inspect_patch,
     parse_gemini_patch_response,
 )
-from local_ai_bridge.services.temp_storage import managed_subdir
+from local_ai_bridge.services.temp_storage import latest_markdown_file, managed_subdir
 from local_ai_bridge.services.speech_to_text import merge_task_text
 from local_ai_bridge.ui.speech_dialog import SpeechDialog
 PATCH_MARKER = re.compile('<{7}\\s*SEARCH', re.IGNORECASE)
@@ -70,7 +75,10 @@ class WorkflowActionsMixin:
         workspace = self._require_workspace()
         if not workspace:
             return
-        task = self.task_edit.toPlainText()
+        task = compose_task_with_preset(
+            self.task_edit.toPlainText(),
+            self.prompt_preset_combo.currentData(),
+        )
         self.report_button.setEnabled(False)
         self.report_button.setText(_('Generazione...'))
         self.report_edit.setPlaceholderText(_('Scansione del progetto in corso...'))
@@ -180,6 +188,98 @@ class WorkflowActionsMixin:
         self.response_edit.setFocus()
         self._show_status(_('Risposta incollata dagli appunti.'))
 
+    def _markdown_download_directory(self) -> Path:
+        configured = self.settings.update_zip_directory.strip()
+        if configured:
+            return Path(configured).expanduser()
+        downloads = Path.home() / 'Downloads'
+        return downloads if downloads.is_dir() else Path.home()
+
+    def choose_markdown_download_directory(self) -> None:
+        initial = self._markdown_download_directory()
+        selected = QFileDialog.getExistingDirectory(
+            self,
+            _('Scegli la cartella dei Markdown scaricati'),
+            str(initial),
+        )
+        if not selected:
+            return
+        self.settings.update_zip_directory = selected
+        self.settings_store.save(self.settings)
+        self._show_status(
+            _('Cartella Markdown scaricati: {path}').format(path=selected)
+        )
+
+    def paste_markdown_result_from_clipboard(self) -> None:
+        text = QApplication.clipboard().text()
+        self.markdown_result_edit.setPlainText(text)
+        self.markdown_result_edit.setFocus()
+        self._show_status(_('Risposta Markdown incollata dagli appunti.'))
+
+    def _inspect_markdown_response_text(self, text: str) -> bool:
+        workspace = self._require_workspace()
+        if not workspace:
+            return False
+        if not text.strip():
+            QMessageBox.warning(
+                self,
+                _('Risposta Markdown richiesta'),
+                _('Incolla o seleziona prima il documento Markdown restituito dall’AI.'),
+            )
+            return False
+        try:
+            plan = parse_markdown_response(workspace, text)
+            snapshot = managed_subdir(self.settings.temp_directory, 'patches') / 'latest_markdown_response.md'
+            snapshot.write_text(text, encoding='utf-8')
+            self.display_plan(plan)
+        except Exception as exc:
+            QMessageBox.critical(self, _('Risposta Markdown non valida'), str(exc))
+            return False
+        self._show_status(
+            _('Risposta Markdown analizzata: {files} file.').format(files=len(plan.changes))
+        )
+        return True
+
+    def prepare_pasted_markdown_response(self) -> None:
+        self._inspect_markdown_response_text(self.markdown_result_edit.toPlainText())
+
+    def _load_markdown_response(self, path: Path) -> None:
+        try:
+            source = path.expanduser().resolve(strict=True)
+            if not source.is_file() or source.suffix.casefold() not in {'.md', '.markdown'}:
+                raise ValueError(_('Il file selezionato non è un documento Markdown valido.'))
+            text = source.read_text(encoding='utf-8-sig')
+        except Exception as exc:
+            QMessageBox.critical(self, _('Lettura Markdown fallita'), str(exc))
+            return
+        self.markdown_result_edit.setPlainText(text)
+        if self._inspect_markdown_response_text(text):
+            self._show_status(
+                _('Markdown caricato da {path}. Controlla l’anteprima prima di applicare.').format(path=source)
+            )
+
+    def choose_markdown_response(self) -> None:
+        selected, _selected_filter = QFileDialog.getOpenFileName(
+            self,
+            _('Scegli la risposta Markdown'),
+            str(self._markdown_download_directory()),
+            _('Markdown (*.md);;Tutti i file (*)'),
+        )
+        if selected:
+            self._load_markdown_response(Path(selected))
+
+    def apply_latest_markdown(self) -> None:
+        directory = self._markdown_download_directory()
+        latest = latest_markdown_file(directory)
+        if latest is None:
+            QMessageBox.warning(
+                self,
+                _('Nessun Markdown trovato'),
+                _('Nessun file Markdown è stato trovato nella cartella:\n{path}').format(path=directory),
+            )
+            return
+        self._load_markdown_response(latest)
+
     def paste_gemini_result_from_clipboard(self) -> None:
         text = QApplication.clipboard().text()
         self.gemini_result_edit.setPlainText(text)
@@ -211,6 +311,10 @@ class WorkflowActionsMixin:
 
     def analyze_response(self) -> None:
         text = self.response_edit.toPlainText()
+        if self.settings.markdown_exchange_mode and 'BRIDGAI:FILE' in text.upper():
+            self._inspect_markdown_response_text(text)
+            return
+
         requested = parse_download_requests(text)
         rows: list[str] = []
         if requested:
@@ -221,6 +325,38 @@ class WorkflowActionsMixin:
             rows.append(_('Nessun #scarica o blocco SEARCH/REPLACE rilevato. Puoi trattare il testo come file completo.'))
         QMessageBox.information(self, _('Analisi risposta'), '\n\n'.join(rows))
 
+    def _export_requested_files_as_markdown(self, workspace: Path, requested: list[str]) -> None:
+        try:
+            destination = export_files_to_markdown(
+                workspace,
+                requested,
+                managed_subdir(self.settings.temp_directory, 'exports'),
+            )
+            markdown = destination.read_text(encoding='utf-8')
+            QApplication.clipboard().setText(markdown)
+        except Exception as exc:
+            QMessageBox.critical(self, _('Esportazione Markdown fallita'), str(exc))
+            return
+        if self.settings.simple_mode:
+            QMessageBox.information(
+                self,
+                _('Markdown pronto'),
+                _('Il Markdown è pronto e sostituirà quello precedente dello stesso progetto. Premi OK per aprire la cartella.\n\n{path}').format(path=destination),
+            )
+            if not QDesktopServices.openUrl(QUrl.fromLocalFile(str(destination.parent))):
+                QMessageBox.warning(
+                    self,
+                    _('Apertura cartella non riuscita'),
+                    f'Non è stato possibile aprire la cartella:\n{destination.parent}',
+                )
+        else:
+            QMessageBox.information(
+                self,
+                _('Markdown pronto'),
+                _('Il documento Markdown è stato salvato e copiato negli appunti:\n{path}').format(path=destination),
+            )
+        self._show_status(_('Markdown Exchange esportato: {path}').format(path=destination))
+
     def export_requested_files(self) -> None:
         workspace = self._require_workspace()
         if not workspace:
@@ -228,6 +364,9 @@ class WorkflowActionsMixin:
         requested = parse_download_requests(self.response_edit.toPlainText())
         if not requested:
             QMessageBox.warning(self, '#scarica', _('Nessuna riga #scarica rilevata nella risposta.'))
+            return
+        if self.settings.markdown_exchange_mode:
+            self._export_requested_files_as_markdown(workspace, requested)
             return
         if self.settings.gemini_drive_enabled:
             drive_directory = self._gemini_drive_directory()

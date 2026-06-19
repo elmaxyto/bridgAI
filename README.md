@@ -240,3 +240,22 @@ See [CHANGELOG.md](CHANGELOG.md) and the historical `AGGIORNAMENTO_*.md` release
 ## License
 
 BridgAI is released under the [MIT License](LICENSE).
+
+## Project-local report exclusions
+
+Create `.bridgai/ignore` in a workspace to omit noisy project files from the Super-Report without changing `.gitignore`. Use one glob per line; blank lines and lines beginning with `#` are ignored. Examples:
+
+```text
+dist/
+*.sqlite
+docs/generated/**
+```
+
+These rules affect only scanner/report context, including the tree, summaries, task candidates, and priority notes. They do not weaken sensitive-path checks and do not change ZIP, patch, apply, or filesystem safety behavior.
+
+
+### Global and per-project prompts
+
+The **Settings** tab can store persistent instructions for inclusion in the Super-Report. The global prompt applies to every workspace, while the current project prompt is stored in `.bridgai/project.json`. A toggle can temporarily omit both prompts from reports without deleting them.
+
+Custom instructions and the `.bridgai/ignore` editor are available in the **Advanced** tab. Saved settings continue to apply while the interface is in super simple mode, but they cannot be edited from that workflow.

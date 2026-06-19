@@ -1,0 +1,32 @@
+[
+  {
+    "id": "debug",
+    "label": "Debug guidato",
+    "description": "Individua la causa reale e proponi una correzione minima verificabile.",
+    "instructions": "Analizza il problema prima di modificare il codice. Individua la causa radice, limita la modifica allo stretto necessario, preserva la compatibilità e aggiungi o aggiorna un test di regressione quando possibile."
+  },
+  {
+    "id": "safe_refactor",
+    "label": "Refactor sicuro",
+    "description": "Migliora la struttura senza cambiare il comportamento osservabile.",
+    "instructions": "Esegui un refactor conservativo. Mantieni API, comportamento e formati persistenti compatibili; separa le responsabilità senza introdurre nuovi monoliti e indica i test che dimostrano l'assenza di regressioni."
+  },
+  {
+    "id": "write_tests",
+    "label": "Scrivi test",
+    "description": "Concentrati su copertura utile, casi limite e regressioni.",
+    "instructions": "Dai priorità ai test automatici. Copri il comportamento richiesto, almeno un caso limite significativo e le regressioni plausibili; evita test fragili legati a dettagli interni non necessari."
+  },
+  {
+    "id": "security_review",
+    "label": "Review sicurezza",
+    "description": "Valuta superfici d'attacco, validazione e confini di fiducia.",
+    "instructions": "Svolgi una revisione orientata alla sicurezza. Considera input non fidati, traversal, autorizzazioni, segreti, esposizione di rete e operazioni distruttive. Non indebolire le conferme esplicite dell'utente e proponi correzioni accompagnate da test mirati."
+  },
+  {
+    "id": "analysis_only",
+    "label": "Solo analisi",
+    "description": "Esamina il problema senza produrre modifiche applicabili.",
+    "instructions": "Limita la risposta all'analisi. Non creare ZIP, patch o file completi e non proporre modifiche come già pronte da applicare. Descrivi cause probabili, file coinvolti, opzioni, rischi e verifiche consigliate."
+  }
+]

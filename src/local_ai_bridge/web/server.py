@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from local_ai_bridge.services.git import GitIntegrationError
+from local_ai_bridge.services.pre_apply import build_pre_apply_summary
 from local_ai_bridge.web.network import connection_status_payload
 from local_ai_bridge.web.page import render_index, render_manifest
 from local_ai_bridge.web.project_actions import (
@@ -57,6 +58,7 @@ def _plan_payload(state: BridgeState, plan_id: str) -> dict[str, Any]:
         "warnings": plan.warnings,
         "diff": plan.diff,
         "commit_message": plan.metadata.get("commit_message"),
+        "pre_apply": build_pre_apply_summary(plan),
     }
 
 
@@ -249,9 +251,14 @@ class BridgeHandler(BaseHTTPRequestHandler):
 
         workspace = state.require_workspace()
         if path == "/api/report":
+            from local_ai_bridge.core.prompt_presets import compose_task_with_preset
             from local_ai_bridge.services.reporting import build_super_report
 
-            return {"report": build_super_report(workspace, str(body.get("task", "")))}
+            task = compose_task_with_preset(
+                str(body.get("task", "")),
+                str(body.get("preset_id", "")),
+            )
+            return {"report": build_super_report(workspace, task)}
         if path == "/api/export":
             from local_ai_bridge.services.exporting import create_export_zip, parse_download_requests
             from local_ai_bridge.services.temp_storage import managed_subdir
@@ -294,6 +301,21 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 raise ValueError("Conferma di rollback mancante.")
             record = state.apply_service.rollback_latest(workspace)
             return {"session": record.to_dict()}
+        if path == "/api/github/simple/status":
+            from local_ai_bridge.services.github import simple_github_status
+
+            return simple_github_status(workspace)
+        if path == "/api/github/simple/publish":
+            if body.get("confirm") != "PUBLISH":
+                raise ValueError("Conferma di pubblicazione mancante.")
+            from local_ai_bridge.services.github import publish_or_update_github
+
+            return publish_or_update_github(
+                workspace,
+                repository_name=str(body.get("repository_name", "")).strip() or workspace.name,
+                visibility=str(body.get("visibility", "private")),
+                session_manager=state.sessions,
+            )
         if path == "/api/tests":
             from local_ai_bridge.services.testing import format_test_results, run_detected_tests
 

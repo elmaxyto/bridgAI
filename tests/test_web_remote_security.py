@@ -78,4 +78,8 @@ def test_mobile_page_contains_username_and_password_login() -> None:
     page = render_index("csrf-value", "1.0.0")
     assert 'id="authUsername"' in page
     assert 'id="authPassword"' in page
+    assert 'id="rememberCredentials"' in page
     assert "Basic " in page
+    assert "localStorage" in page
+    assert "sessionStorage" in page
+    assert "storageRemove('localStorage',authKey)" in page

@@ -199,3 +199,105 @@ def test_scanner_skips_excluded_dirs_case_insensitively(tmp_path: Path) -> None:
     report = build_super_report(tmp_path)
     assert "visible.py" in report
     assert "SECRET_MARKER" not in report
+
+
+def test_project_ignore_excludes_files_directories_candidates_and_notes(tmp_path: Path) -> None:
+    config = tmp_path / ".bridgai"
+    config.mkdir()
+    (config / "ignore").write_text(
+        "# Project-local report exclusions\n"
+        "generated/\n"
+        "*.sqlite\n"
+        "docs/private/**\n"
+        "TODO.md\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "visible.py").write_text("VISIBLE_MARKER = True\n", encoding="utf-8")
+    generated = tmp_path / "generated"
+    generated.mkdir()
+    (generated / "ignored.py").write_text("IGNORED_GENERATED = True\n", encoding="utf-8")
+    (tmp_path / "local.sqlite").write_text("IGNORED_DATABASE", encoding="utf-8")
+    private = tmp_path / "docs" / "private"
+    private.mkdir(parents=True)
+    (private / "secret.md").write_text("IGNORED_PRIVATE_DOC", encoding="utf-8")
+    (tmp_path / "TODO.md").write_text("IGNORED_PRIORITY_NOTE", encoding="utf-8")
+
+    report = build_super_report(tmp_path, "Modifica ignored.py e secret.md")
+
+    assert "VISIBLE_MARKER" in report
+    assert "IGNORED_GENERATED" not in report
+    assert "IGNORED_DATABASE" not in report
+    assert "IGNORED_PRIVATE_DOC" not in report
+    assert "IGNORED_PRIORITY_NOTE" not in report
+    assert "generated/" not in report
+    assert "local.sqlite" not in report
+    assert "docs/private" not in report
+    assert "`TODO.md`" not in report
+    assert ".bridgai/ignore" not in report
+
+
+def test_project_ignore_does_not_replace_sensitive_path_rules(tmp_path: Path) -> None:
+    config = tmp_path / ".bridgai"
+    config.mkdir()
+    (config / "ignore").write_text("visible.py\n", encoding="utf-8")
+    (tmp_path / "visible.py").write_text("VISIBLE = True\n", encoding="utf-8")
+    (tmp_path / ".env").write_text("SECRET_STILL_BLOCKED=1\n", encoding="utf-8")
+
+    report = build_super_report(tmp_path)
+
+    assert "VISIBLE = True" not in report
+    assert "SECRET_STILL_BLOCKED" not in report
+
+
+def test_report_includes_global_and_project_prompts(tmp_path: Path, monkeypatch) -> None:
+    from local_ai_bridge.core.project_prompts import save_project_prompt
+    from local_ai_bridge.core.settings import AppSettings
+    from local_ai_bridge.services import reporting
+
+    (tmp_path / "app.py").write_text("VALUE = 1\n", encoding="utf-8")
+    save_project_prompt(tmp_path, "Keep adapters separate.")
+
+    class FakeStore:
+        def load(self):
+            return AppSettings(global_prompt="Use English and type hints.")
+
+    monkeypatch.setattr(reporting, "SettingsStore", FakeStore)
+    report = build_super_report(tmp_path, "Update app")
+    assert "## 1.1 Istruzioni personalizzate" in report
+    assert "### Prompt globale" in report
+    assert "Use English and type hints." in report
+    assert "### Prompt del progetto" in report
+    assert "Keep adapters separate." in report
+
+
+def test_report_can_disable_custom_prompts(tmp_path: Path, monkeypatch) -> None:
+    from local_ai_bridge.core.project_prompts import save_project_prompt
+    from local_ai_bridge.core.settings import AppSettings
+    from local_ai_bridge.services import reporting
+
+    (tmp_path / "app.py").write_text("VALUE = 1\n", encoding="utf-8")
+    save_project_prompt(tmp_path, "DO_NOT_INCLUDE_PROJECT")
+
+    class FakeStore:
+        def load(self):
+            return AppSettings(
+                include_custom_prompts=False,
+                global_prompt="DO_NOT_INCLUDE_GLOBAL",
+            )
+
+    monkeypatch.setattr(reporting, "SettingsStore", FakeStore)
+    report = build_super_report(tmp_path, "Update app")
+    assert "Inclusione disabilitata nelle impostazioni." in report
+    assert "DO_NOT_INCLUDE_PROJECT" not in report
+    assert "DO_NOT_INCLUDE_GLOBAL" not in report
+
+
+def test_report_can_include_composed_prompt_preset(tmp_path: Path) -> None:
+    from local_ai_bridge.core.prompt_presets import compose_task_with_preset
+
+    (tmp_path / "app.py").write_text("VALUE = 1\n", encoding="utf-8")
+    task = compose_task_with_preset("Correggi il problema.", "safe_refactor")
+    report = build_super_report(tmp_path, task)
+    assert "Correggi il problema." in report
+    assert "Preset selezionato: Refactor sicuro" in report
+    assert "senza sostituirlo" in report

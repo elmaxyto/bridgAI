@@ -14,6 +14,10 @@ from local_ai_bridge.services.git import (
     git_has_commits,
     git_init,
     git_remote_url,
+    generate_commit_message,
+    create_commit,
+    push_current_branch,
+    _current_changes,
     is_git_repository,
     validate_remote_name,
 )
@@ -287,3 +291,100 @@ def connect_github_repository(
         f"Repository collegato: {slug}\n\n"
         "Nessun pull, merge o push è stato eseguito automaticamente."
     )
+
+
+
+def _repository_slug(remote_url: str | None) -> str | None:
+    if not remote_url:
+        return None
+    try:
+        slug, _canonical = normalize_github_repository(remote_url)
+    except GitIntegrationError:
+        return None
+    return slug
+
+
+def _repository_web_url(remote_url: str | None) -> str | None:
+    slug = _repository_slug(remote_url)
+    return f"https://github.com/{slug}" if slug else None
+
+
+def simple_github_status(workspace: Path) -> dict[str, object]:
+    """Return the small set of facts needed by the one-click GitHub UI."""
+    remote = git_remote_url(workspace, "origin") if is_git_repository(workspace) else None
+    changes = _current_changes(workspace) if is_git_repository(workspace) else []
+    return {
+        "git_available": git_available(),
+        "github_cli_available": github_cli_available(),
+        "is_repository": is_git_repository(workspace),
+        "published": bool(remote),
+        "has_changes": bool(changes),
+        "change_count": len(changes),
+        "repository_name": _repository_slug(remote),
+        "suggested_repository_name": workspace.name,
+        "repository_url": _repository_web_url(remote),
+        "action": "update" if remote else "publish",
+    }
+
+
+def publish_or_update_github(
+    workspace: Path,
+    *,
+    repository_name: str | None = None,
+    visibility: str = "private",
+    session_manager=None,
+) -> dict[str, object]:
+    """Publish or update the current project with one explicit user action.
+
+    The function initializes Git when needed, creates a reviewable automatic
+    commit from real changes, creates a GitHub repository when origin is absent,
+    and pushes the current branch. It never pulls, merges, rebases, or force-pushes.
+    """
+    if not git_available():
+        raise GitIntegrationError("Git non è installato o non è presente nel PATH.")
+    if not github_cli_available():
+        raise GitIntegrationError("GitHub CLI (gh) non è installata.")
+    accounts = list_github_accounts()
+    if not accounts:
+        raise GitIntegrationError("Nessun account GitHub collegato. Accedi a GitHub e riprova.")
+    if visibility not in {"private", "public"}:
+        raise GitIntegrationError("Visibilità GitHub non valida.")
+
+    if not is_git_repository(workspace):
+        git_init(workspace)
+
+    changes = _current_changes(workspace)
+    commit_created = False
+    commit_message = None
+    if changes:
+        commit_message = generate_commit_message(workspace, session_manager)
+        create_commit(workspace, commit_message)
+        commit_created = True
+
+    if not git_has_commits(workspace):
+        raise GitIntegrationError("Il progetto non contiene file da pubblicare.")
+
+    remote = git_remote_url(workspace, "origin")
+    created_repository = False
+    if not remote:
+        name = _validate_new_repository_name(repository_name or workspace.name)
+        create_github_repository(
+            workspace,
+            name,
+            visibility=visibility,
+            description=f"Progetto {workspace.name} pubblicato con BridgAI",
+            push=False,
+        )
+        remote = git_remote_url(workspace, "origin")
+        created_repository = True
+
+    push_output = push_current_branch(workspace)
+    return {
+        "message": "Progetto pubblicato su GitHub." if created_repository else "GitHub aggiornato correttamente.",
+        "repository_created": created_repository,
+        "commit_created": commit_created,
+        "commit_message": commit_message,
+        "change_count": len(changes),
+        "repository_url": _repository_web_url(remote),
+        "output": push_output,
+    }
