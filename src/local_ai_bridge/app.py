@@ -58,6 +58,11 @@ def main() -> int:
                 remote_access=settings.web_remote_access,
                 username=settings.web_username or None,
                 password_hash=settings.web_password_hash or None,
+                totp_secret=(
+                    settings.web_totp_secret
+                    if settings.web_totp_enabled else None
+                ),
+                totp_local_bypass=settings.web_totp_local_bypass,
             )
             web_process = result.process
             info_url = result.url

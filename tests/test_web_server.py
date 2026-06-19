@@ -75,6 +75,15 @@ def test_web_page_shows_connection_address() -> None:
     assert "renderConnection(status)" in page
 
 
+def test_mobile_header_allows_brand_to_shrink_without_clipping_controls() -> None:
+    page = render_index("csrf", "1.0.0")
+
+    assert "grid-template-columns:minmax(0,1fr) auto" in page
+    assert ".brand,.brand>div{min-width:0}" in page
+    assert ".header-meta{justify-content:flex-end;min-width:max-content}" in page
+    assert ".project-chip{display:none}" in page
+
+
 def test_restart_endpoint(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
     state = BridgeState()
@@ -217,6 +226,10 @@ def test_web_page_supports_persistent_light_and_dark_themes() -> None:
     assert "Passa alla modalità chiara" in page
     assert "Passa alla modalità scura" in page
     assert "meta[name=\"theme-color\"]" in page
+    assert "document.startViewTransition" in page
+    assert "theme-reveal" in page
+    assert "prefers-reduced-motion:reduce" in page
+    assert "theme-toggle-active" in page
 
 
 def test_web_page_interprets_partial_test_results() -> None:
