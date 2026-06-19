@@ -226,3 +226,35 @@ def test_web_page_interprets_partial_test_results() -> None:
     assert "data.interpretation" in page
     assert ".feedback.warning" in page
     assert "I test non annullano automaticamente l’aggiornamento" in page
+
+
+def test_web_page_exposes_favicon_language_and_dictation_controls() -> None:
+    page = render_index("csrf", "1.0.0")
+
+    assert 'rel="icon" href="/favicon.svg"' in page
+    assert 'id="languageSelect"' in page
+    assert 'changeLanguage(this.value)' in page
+    assert 'bridgai-web-language' in page
+    assert 'id="dictationButton"' in page
+    assert 'toggleDictation()' in page
+    assert 'SpeechRecognition' in page
+    assert 'webkitSpeechRecognition' in page
+
+
+def test_web_server_serves_svg_favicon(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+    state = BridgeState()
+    server = BridgeHTTPServer(("127.0.0.1", 0), state)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base = f"http://127.0.0.1:{server.server_address[1]}"
+    try:
+        with urllib.request.urlopen(base + "/favicon.svg", timeout=5) as response:
+            body = response.read().decode("utf-8")
+            assert response.headers.get_content_type() == "image/svg+xml"
+        assert body.startswith("<svg")
+        assert "linearGradient" in body
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)

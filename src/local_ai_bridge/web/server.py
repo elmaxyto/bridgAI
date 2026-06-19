@@ -18,7 +18,7 @@ from typing import Any
 from local_ai_bridge.services.git import GitIntegrationError
 from local_ai_bridge.services.pre_apply import build_pre_apply_summary
 from local_ai_bridge.web.network import connection_status_payload
-from local_ai_bridge.web.page import render_index, render_manifest
+from local_ai_bridge.web.page import render_favicon_svg, render_index, render_manifest
 from local_ai_bridge.web.project_actions import (
     dispatch_project_action,
     project_status_payload,
@@ -154,6 +154,16 @@ class BridgeHandler(BaseHTTPRequestHandler):
                         connection_address=connection["connection_address"],
                     )
                 )
+                return
+            if parsed.path == "/favicon.svg":
+                data = render_favicon_svg().encode("utf-8")
+                self.send_response(HTTPStatus.OK)
+                self.send_header("Content-Type", "image/svg+xml; charset=utf-8")
+                self.send_header("Content-Length", str(len(data)))
+                self.send_header("Cache-Control", "public, max-age=86400")
+                self.send_header("X-Content-Type-Options", "nosniff")
+                self.end_headers()
+                self.wfile.write(data)
                 return
             if parsed.path == "/manifest.webmanifest":
                 data = render_manifest(APPLICATION_VERSION).encode("utf-8")

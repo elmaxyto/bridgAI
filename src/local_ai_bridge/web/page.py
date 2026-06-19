@@ -17,9 +17,18 @@ def render_manifest(version: str) -> str:
             "background_color": "#0b1220",
             "theme_color": "#2563eb",
             "description": "Assistente mobile semplice per workspace BridgAI.",
+            "icons": [{"src": "/favicon.svg", "sizes": "any", "type": "image/svg+xml"}],
         },
         ensure_ascii=False,
     )
+
+
+def render_favicon_svg() -> str:
+    return """<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+<defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#5f89ff"/><stop offset="1" stop-color="#3157d9"/></linearGradient></defs>
+<rect width="64" height="64" rx="16" fill="url(#g)"/>
+<path d="M19 14h17c8 0 13 4 13 10 0 4-2 7-6 9 5 2 8 5 8 10 0 8-6 12-15 12H19V14zm10 9v7h7c3 0 5-1 5-4s-2-3-5-3h-7zm0 15v8h8c4 0 6-1 6-4s-2-4-6-4h-8z" fill="white"/>
+</svg>"""
 
 
 def _step(number: str, title: str, description: str, body: str) -> str:
@@ -49,7 +58,8 @@ def render_index(
         "Scrivi con parole semplici cosa vuoi creare, correggere o migliorare.",
         f"""
 <label for="task">Cosa vuoi ottenere?</label>
-<textarea id="task" placeholder="Ad esempio: rendi più semplice la schermata iniziale e usa pulsanti più chiari..."></textarea>
+<div class="task-input-wrap"><textarea id="task" placeholder="Ad esempio: rendi più semplice la schermata iniziale e usa pulsanti più chiari..."></textarea><button id="dictationButton" class="secondary dictation-button" type="button" onclick="toggleDictation()" aria-pressed="false" title="Avvia dettatura vocale">🎙 <span id="dictationLabel">Dettatura</span></button></div>
+<div id="dictationResult" class="feedback"></div>
 <label for="promptPreset">Preset di prompt</label>
 <select id="promptPreset">{preset_select}</select>
 <p class="field-help">Il preset aggiunge istruzioni alla richiesta senza modificare il testo scritto.</p>
@@ -108,9 +118,9 @@ def render_index(
     script = PAGE_SCRIPT.replace("__CSRF__", json.dumps(csrf_token))
     return f"""<!doctype html>
 <html lang="it"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-<meta name="theme-color" content="#07111f"><script>(function(){{try{{var saved=localStorage.getItem('bridgai-web-theme');var system=window.matchMedia&&window.matchMedia('(prefers-color-scheme: light)').matches?'light':'dark';document.documentElement.dataset.theme=saved==='light'||saved==='dark'?saved:system}}catch(_){{document.documentElement.dataset.theme='dark'}}}})();</script><link rel="manifest" href="/manifest.webmanifest"><title>BridgAI Web {safe_version}</title><style>{PAGE_STYLE}</style></head>
+<meta name="theme-color" content="#07111f"><link rel="icon" href="/favicon.svg" type="image/svg+xml"><link rel="apple-touch-icon" href="/favicon.svg"><script>(function(){{try{{var saved=localStorage.getItem('bridgai-web-theme');var system=window.matchMedia&&window.matchMedia('(prefers-color-scheme: light)').matches?'light':'dark';document.documentElement.dataset.theme=saved==='light'||saved==='dark'?saved:system}}catch(_){{document.documentElement.dataset.theme='dark'}}}})();</script><link rel="manifest" href="/manifest.webmanifest"><title>BridgAI Web {safe_version}</title><style>{PAGE_STYLE}</style></head>
 <body>
-<header><div class="header-row"><div class="brand"><span class="brand-mark" aria-hidden="true">B</span><div><strong>BridgAI Web</strong><small class="connection-line">Collegati a <strong id="connectionAddress">{displayed_address}</strong></small></div></div><div class="header-meta"><button id="themeToggle" class="theme-toggle" type="button" onclick="toggleTheme()" aria-label="Passa alla modalità chiara" title="Passa alla modalità chiara"><span id="themeIcon" aria-hidden="true">☀</span></button><span id="currentProject" class="project-chip">Nessun progetto aperto</span><span id="modeBadge" class="badge">Connessione…</span></div></div></header>
+<header><div class="header-row"><div class="brand"><span class="brand-mark" aria-hidden="true">B</span><div><strong>BridgAI Web</strong><small class="connection-line">Collegati a <strong id="connectionAddress">{displayed_address}</strong></small></div></div><div class="header-meta"><label class="language-control" for="languageSelect"><span class="sr-only">Lingua</span><select id="languageSelect" onchange="changeLanguage(this.value)" aria-label="Lingua interfaccia"><option value="it">IT</option><option value="en">EN</option></select></label><button id="themeToggle" class="theme-toggle" type="button" onclick="toggleTheme()" aria-label="Passa alla modalità chiara" title="Passa alla modalità chiara"><span id="themeIcon" aria-hidden="true">☀</span></button><span id="currentProject" class="project-chip">Nessun progetto aperto</span><span id="modeBadge" class="badge">Connessione…</span></div></div></header>
 <div id="busy"><div>Operazione in corso…</div></div>
 <main>
 <section id="authCard" class="card"><h2>Accesso</h2><p class="muted">Inserisci le credenziali configurate in BridgAI.</p><div class="grid"><div><label for="authUsername">Username</label><input id="authUsername" autocomplete="username"></div><div><label for="authPassword">Password</label><input id="authPassword" type="password" autocomplete="current-password"></div></div><label class="switch-row" for="rememberCredentials"><input id="rememberCredentials" type="checkbox"><span class="switch-track" aria-hidden="true"></span><span>Ricorda username e password su questo browser</span></label><p class="muted">Le credenziali restano nella memoria del browser fino a “Disconnetti”. Attiva questa opzione solo su un dispositivo personale e usa HTTPS o una VPN per l’accesso remoto.</p><div class="actions"><button onclick="login()">Accedi</button><button class="secondary" onclick="logout()">Disconnetti</button></div><div id="authResult" class="feedback"></div></section>
