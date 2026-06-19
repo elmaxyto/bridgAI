@@ -317,10 +317,18 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 session_manager=state.sessions,
             )
         if path == "/api/tests":
-            from local_ai_bridge.services.testing import format_test_results, run_detected_tests
+            from local_ai_bridge.services.testing import (
+                format_test_results,
+                interpret_test_results,
+                run_detected_tests,
+            )
 
             results = run_detected_tests(workspace)
-            return {"output": format_test_results(results), "results": [asdict(item) for item in results]}
+            return {
+                "output": format_test_results(results),
+                "results": [asdict(item) for item in results],
+                "interpretation": interpret_test_results(results),
+            }
         if path == "/api/git/status":
             from local_ai_bridge.services.git import git_status
 

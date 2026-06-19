@@ -47,7 +47,9 @@ def test_mobile_page_contains_upload_and_auth_controls() -> None:
     assert "Authorization" in page
     assert "/api/patch/inspect" in page
     assert "/api/artifacts/" in page
-    assert "/api/settings/workspace-root" in page
+    assert 'id="workspaceRoot" readonly' in page
+    assert "/api/settings/workspace-root" not in page
+    assert "Configura la root nelle Impostazioni del programma BridgAI" in page
     assert "/api/projects/create" in page
     assert "/api/projects/clone" in page
     assert "csrf-value" in page

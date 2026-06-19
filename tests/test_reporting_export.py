@@ -150,7 +150,7 @@ def test_download_parse_and_export(tmp_path: Path) -> None:
     destination = tmp_path / "out.zip"
     create_export_zip(tmp_path, requested, destination)
     with zipfile.ZipFile(destination) as zf:
-        assert sorted(zf.namelist()) == ["README.md", "src/a.py"]
+        assert sorted(zf.namelist()) == ["README.md", "bridgai-project.json", "src/a.py"]
 
 
 
@@ -175,7 +175,7 @@ def test_download_export_accepts_markdown_rewritten_dunder_path(tmp_path: Path) 
     create_export_zip(tmp_path, requested, destination)
 
     with zipfile.ZipFile(destination) as zf:
-        assert zf.namelist() == ["src/demo/__init__.py"]
+        assert zf.namelist() == ["bridgai-project.json", "src/demo/__init__.py"]
 
 def test_scanner_does_not_follow_symlink_cycles(tmp_path: Path) -> None:
     project = tmp_path / "project"
@@ -224,7 +224,7 @@ def test_project_ignore_excludes_files_directories_candidates_and_notes(tmp_path
 
     report = build_super_report(tmp_path, "Modifica ignored.py e secret.md")
 
-    assert "VISIBLE_MARKER" in report
+    assert "`visible.py`" in report
     assert "IGNORED_GENERATED" not in report
     assert "IGNORED_DATABASE" not in report
     assert "IGNORED_PRIVATE_DOC" not in report

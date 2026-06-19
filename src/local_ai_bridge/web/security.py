@@ -106,8 +106,16 @@ class WebSecurityConfig:
                 raise ValueError("Il workspace fisso deve trovarsi dentro la root autorizzata.") from exc
 
         if not is_loopback_host(host):
+            if normalized_token is None and normalized_password_hash is None:
+                raise ValueError(
+                    "Per l'accesso remoto configura un token oppure username e password."
+                )
             if normalized_token is not None and len(normalized_token) < 24:
                 raise ValueError("Il token remoto deve contenere almeno 24 caratteri.")
+            if root is None and fixed is None:
+                raise ValueError(
+                    "Per l'accesso remoto configura --workspace-root oppure --workspace."
+                )
 
         return cls(
             host=host,

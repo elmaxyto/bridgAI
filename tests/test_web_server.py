@@ -203,3 +203,26 @@ def test_web_page_renders_pre_apply_checklist() -> None:
     assert "Checklist pre-applicazione" in page
     assert "data.pre_apply" in page
     assert "Hai controllato la checklist pre-applicazione?" in page
+
+
+def test_web_page_supports_persistent_light_and_dark_themes() -> None:
+    page = render_index("csrf", "1.0.0")
+
+    assert 'id="themeToggle"' in page
+    assert 'onclick="toggleTheme()"' in page
+    assert 'bridgai-web-theme' in page
+    assert ':root[data-theme="light"]' in page
+    assert "prefers-color-scheme: light" in page
+    assert "localStorage.getItem('bridgai-web-theme')" in page
+    assert "Passa alla modalità chiara" in page
+    assert "Passa alla modalità scura" in page
+    assert "meta[name=\"theme-color\"]" in page
+
+
+def test_web_page_interprets_partial_test_results() -> None:
+    page = render_index("csrf", "1.0.0")
+
+    assert 'onclick="runTests()"' in page
+    assert "data.interpretation" in page
+    assert ".feedback.warning" in page
+    assert "I test non annullano automaticamente l’aggiornamento" in page
