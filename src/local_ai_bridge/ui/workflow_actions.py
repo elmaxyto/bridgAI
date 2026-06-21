@@ -86,22 +86,34 @@ class WorkflowActionsMixin:
 
     def _handle_report_result(self, result) -> None:
         self._handle_skill_text_result(result, self.report_edit)
-        if result.ok:
-            if self.settings.simple_mode and self.settings.gemini_drive_enabled:
-                report = self.report_edit.toPlainText().rstrip()
-                if GEMINI_REPORT_PROTOCOL not in report:
-                    self.report_edit.setPlainText(f'{report}\n\n{GEMINI_REPORT_PROTOCOL}\n')
-            if self.settings.simple_mode:
-                message = (
-                    _('Istruzioni copiate. Ora premi “Continua su Gemini” e incollale nella chat.')
-                    if self.settings.gemini_drive_enabled
-                    else _('Istruzioni per AI copiate. Incollale nella tua AI preferita.')
+        if not result.ok:
+            return
+
+        if self.settings.simple_mode and self.settings.gemini_drive_enabled:
+            report = self.report_edit.toPlainText().rstrip()
+            if GEMINI_REPORT_PROTOCOL not in report:
+                self.report_edit.setPlainText(f'{report}\n\n{GEMINI_REPORT_PROTOCOL}\n')
+
+        extension_queued = self.queue_report_with_browser_extension(
+            self.report_edit.toPlainText()
+        )
+
+        if self.settings.simple_mode:
+            if extension_queued:
+                message = _(
+                    'La richiesta è stata affidata all’estensione Chrome. '
+                    'I pulsanti e il flusso manuale restano comunque disponibili.'
                 )
-                QMessageBox.information(
-                    self,
-                    _('Istruzioni per AI esterna'),
-                    message,
-                )
+            elif self.settings.gemini_drive_enabled:
+                message = _('Istruzioni copiate. Ora premi “Continua su Gemini” e incollale nella chat.')
+            else:
+                message = _('Istruzioni per AI copiate. Incollale nella tua AI preferita.')
+            QMessageBox.information(
+                self,
+                _('Istruzioni per AI esterna'),
+                message,
+            )
+        if not extension_queued:
             self._show_status(_('Super-Report generato.'))
 
     def _report_finished(self) -> None:

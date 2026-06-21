@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="it">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>BridgAI — Configurazione</title>
+  <style>
+    body{font:15px system-ui,sans-serif;max-width:720px;margin:40px auto;padding:0 20px;color:#18212f}
+    label{display:block;margin:18px 0 6px;font-weight:650} input[type=text]{width:100%;box-sizing:border-box;padding:10px;border:1px solid #aeb8c7;border-radius:8px}
+    .row{display:flex;gap:12px;align-items:center;margin-top:20px}.row label{margin:0;font-weight:500}button{padding:10px 16px;border:0;border-radius:8px;background:#2563eb;color:white;font-weight:650;cursor:pointer}
+    #status{margin-top:18px;padding:12px;border-radius:8px;background:#eef2f7}.hint{color:#526174;line-height:1.5}
+  </style>
+</head>
+<body>
+  <h1>BridgAI Browser Automation</h1>
+  <p class="hint">Per l’uso locale inserisci <strong>http://127.0.0.1:8765</strong>. Per un server controllato dalla Web UI usa il suo indirizzo pubblico <strong>HTTPS</strong> e il token generato nella sezione Automazione browser.</p>
+  <div class="row"><input id="enabled" type="checkbox"><label for="enabled">Abilita automazione</label></div>
+  <label for="serverUrl">Indirizzo server BridgAI</label><input id="serverUrl" type="text" inputmode="url" autocomplete="url" spellcheck="false" value="http://127.0.0.1:8765" placeholder="https://bridgai.example.com">
+  <label for="token">Token estensione</label><input id="token" type="text" autocomplete="off" spellcheck="false">
+  <label for="downloadSubdirectory">Sottocartella Download per gli ZIP</label><input id="downloadSubdirectory" type="text" autocomplete="off" spellcheck="false" placeholder="BridgAI oppure BridgAI/Aggiornamenti">
+  <p class="hint">Chrome consente all’estensione di scegliere una sottocartella della sua cartella Download. Lascia vuoto per usare la cartella Download standard. La cartella effettiva viene sincronizzata con BridgAI e può essere pulita manualmente.</p>
+  <div class="row"><button id="save">Salva e verifica</button></div>
+  <div id="status">Configurazione non verificata.</div>
+  <script src="options.js"></script>
+</body>
+</html>

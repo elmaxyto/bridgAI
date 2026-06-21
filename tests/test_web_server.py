@@ -75,13 +75,15 @@ def test_web_page_shows_connection_address() -> None:
     assert "renderConnection(status)" in page
 
 
-def test_mobile_header_allows_brand_to_shrink_without_clipping_controls() -> None:
+def test_mobile_header_keeps_only_brand_language_and_theme_controls() -> None:
     page = render_index("csrf", "1.0.0")
 
-    assert "grid-template-columns:minmax(0,1fr) auto" in page
-    assert ".brand,.brand>div{min-width:0}" in page
-    assert ".header-meta{justify-content:flex-end;min-width:max-content}" in page
-    assert ".project-chip{display:none}" in page
+    assert ".header-row{display:flex;align-items:center;justify-content:space-between" in page
+    assert ".brand small{display:none}" in page
+    assert ".header-meta{flex:0 0 auto;min-width:0;justify-content:flex-end" in page
+    assert ".project-chip,.header-meta .badge{display:none}" in page
+    assert ".language-control select{min-height:2.45rem}" in page
+    assert ".theme-toggle{width:2.45rem;height:2.45rem" in page
 
 
 def test_restart_endpoint(tmp_path: Path, monkeypatch) -> None:
@@ -287,9 +289,31 @@ def test_web_page_exposes_two_factor_login_without_storing_password() -> None:
 
     assert 'id="authSecondFactor"' in page
     assert 'autocomplete="one-time-code"' in page
+    assert '<label for="authSecondFactor">Codice 2FA</label>' in page
+    assert "Codice 2FA o recupero" not in page
+    assert 'id="passwordVisibilityToggle"' in page
+    assert 'onclick="togglePasswordVisibility()"' in page
+    assert 'aria-label="Mostra password"' in page
+    assert 'class="password-icon"' in page
+    assert 'password-icon-show' in page
+    assert 'password-icon-hide' in page
+    assert "👁" not in page
     assert "/api/auth/info" in page
     assert "/api/auth/login" in page
     assert "/api/auth/logout" in page
     assert "bridgai-web-session" in page
     assert "Ricorda l’accesso su questo browser" in page
     assert "La password e il codice 2FA non vengono conservati" in page
+
+
+def test_web_page_exposes_remote_browser_automation_controls() -> None:
+    page = render_index("csrf", "1.0.0")
+    assert 'id="automationSendButton"' in page
+    assert 'id="browserAutomation"' in page
+    assert 'id="automationServerUrl"' in page
+    assert 'id="automationToken"' in page
+    assert "/api/browser-automation/configure" in page
+    assert "/api/browser-automation/queue" in page
+    assert "/api/browser-automation/status" in page
+    assert "window.location.origin" in page
+    assert "Per collegare un browser remoto" in page

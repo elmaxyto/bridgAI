@@ -1,0 +1,42 @@
+{
+  "manifest_version": 3,
+  "name": "BridgAI Browser Automation",
+  "version": "0.5.0",
+  "minimum_chrome_version": "120",
+  "description": "Automazione opzionale del flusso tra BridgAI e ChatGPT.",
+  "permissions": [
+    "storage",
+    "tabs",
+    "downloads",
+    "scripting",
+    "alarms"
+  ],
+  "host_permissions": [
+    "http://127.0.0.1/*",
+    "http://localhost/*",
+    "https://chatgpt.com/*",
+    "https://*.oaiusercontent.com/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://chatgpt.com/*"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ],
+  "action": {
+    "default_title": "BridgAI",
+    "default_popup": "popup.html"
+  },
+  "options_page": "options.html",
+  "optional_host_permissions": [
+    "https://*/*"
+  ]
+}

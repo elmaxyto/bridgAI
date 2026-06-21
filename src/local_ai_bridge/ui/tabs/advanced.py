@@ -7,6 +7,7 @@ from PySide6.QtWidgets import (
     QGroupBox,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QPlainTextEdit,
     QScrollArea,
     QTableWidget,
@@ -76,6 +77,98 @@ def _build_ai_context_group(window) -> QGroupBox:
     layout.addLayout(ignore_row)
     return group
 
+
+def _build_browser_extension_group(window) -> QGroupBox:
+    group = QGroupBox(_('Automazione browser'))
+    layout = QVBoxLayout(group)
+
+    description = QLabel(
+        _(
+            'L’estensione Chrome è facoltativa: quando è disattivata BridgAI mantiene '
+            'esattamente il flusso manuale corrente. Quando è attiva può inviare il report, '
+            'ricevere la risposta, gestire #scarica e rilevare lo ZIP finale.'
+        )
+    )
+    description.setWordWrap(True)
+    layout.addWidget(description)
+
+    window.browser_extension_enabled_check = ToggleSwitch(
+        _('Abilita integrazione con estensione Chrome')
+    )
+    window.browser_extension_enabled_check.toggled.connect(
+        window.set_browser_extension_enabled
+    )
+    layout.addWidget(window.browser_extension_enabled_check)
+
+    window.browser_extension_auto_send_check = ToggleSwitch(
+        _('Invia automaticamente la richiesta preparata')
+    )
+    window.browser_extension_auto_receive_check = ToggleSwitch(
+        _('Acquisisci automaticamente la risposta')
+    )
+    window.browser_extension_auto_export_check = ToggleSwitch(
+        _('Gestisci automaticamente le richieste #scarica')
+    )
+    window.browser_extension_auto_download_check = ToggleSwitch(
+        _('Rileva e scarica automaticamente lo ZIP finale')
+    )
+    window.browser_extension_option_checks = [
+        window.browser_extension_auto_send_check,
+        window.browser_extension_auto_receive_check,
+        window.browser_extension_auto_export_check,
+        window.browser_extension_auto_download_check,
+    ]
+    for check in window.browser_extension_option_checks:
+        check.toggled.connect(lambda _checked: window.save_browser_extension_settings())
+        layout.addWidget(check)
+
+    download_hint = QLabel(
+        _(
+            'La sottocartella degli ZIP si configura nelle opzioni dell’estensione Chrome. '
+            'Quando l’estensione è attiva, BridgAI usa automaticamente la stessa cartella; '
+            'quando viene disattivata torna alla cartella Download standard.'
+        )
+    )
+    download_hint.setWordWrap(True)
+    layout.addWidget(download_hint)
+
+    endpoint_row = QHBoxLayout()
+    endpoint_row.addWidget(QLabel(_('Servizio locale:')))
+    window.browser_extension_endpoint_edit = QLineEdit()
+    window.browser_extension_endpoint_edit.setReadOnly(True)
+    endpoint_row.addWidget(window.browser_extension_endpoint_edit, 1)
+    layout.addLayout(endpoint_row)
+
+    token_row = QHBoxLayout()
+    token_row.addWidget(QLabel(_('Token estensione:')))
+    window.browser_extension_token_edit = QLineEdit()
+    window.browser_extension_token_edit.setReadOnly(True)
+    window.browser_extension_token_edit.setEchoMode(QLineEdit.Password)
+    token_row.addWidget(window.browser_extension_token_edit, 1)
+    token_row.addWidget(_button(_('Copia token'), window.copy_browser_extension_token))
+    layout.addLayout(token_row)
+
+    window.browser_extension_status_label = QLabel(_('Estensione non rilevata.'))
+    window.browser_extension_status_label.setWordWrap(True)
+    window.browser_extension_status_label.setProperty('class', 'infoBanner')
+    layout.addWidget(window.browser_extension_status_label)
+
+    actions = QHBoxLayout()
+    actions.addWidget(_button(_('Apri cartella estensione'), window.open_browser_extension_folder))
+    actions.addWidget(_button(_('Verifica connessione'), window.verify_browser_extension_connection))
+    actions.addStretch(1)
+    layout.addLayout(actions)
+
+    warning = QLabel(
+        _(
+            'Gli aggiornamenti non vengono mai applicati automaticamente: il pulsante '
+            '“Applica aggiornamento” resta sempre sotto il controllo dell’utente.'
+        )
+    )
+    warning.setWordWrap(True)
+    layout.addWidget(warning)
+    return group
+
 def build_advanced_tab(window) -> QWidget:
     page = QWidget()
     page_layout = QVBoxLayout(page)
@@ -91,6 +184,8 @@ def build_advanced_tab(window) -> QWidget:
     layout.setContentsMargins(18, 14, 18, 18)
     layout.setSpacing(14)
     layout.addWidget(_build_ai_context_group(window))
+    window.browser_extension_settings_group = _build_browser_extension_group(window)
+    layout.addWidget(window.browser_extension_settings_group)
     layout.addWidget(QLabel(_('Skill interne disponibili')))
     window.skills_table = QTableWidget(0, 4)
     window.skills_table.setHorizontalHeaderLabels(['ID', _('Nome'), _('Permessi'), _('Descrizione')])

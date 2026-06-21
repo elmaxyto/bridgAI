@@ -129,3 +129,48 @@ def test_web_settings_expose_totp_enrollment_and_local_bypass() -> None:
     assert "web_totp_disable_button" in function_source
     assert "web_totp_local_bypass_check" in function_source
     assert "Non richiedere il codice 2FA" in function_source
+
+
+def test_recent_projects_toolbar_uses_persistent_popup_menu() -> None:
+    from local_ai_bridge.ui import main_window, recent_projects
+
+    main_source = Path(main_window.__file__).read_text(encoding="utf-8")
+    toolbar_source = main_source[
+        main_source.index("    def _build_toolbar"):main_source.index("    def show_credits")
+    ]
+    workspace_source = main_source[
+        main_source.index("    def set_workspace"):main_source.index("    def _load_last_workspace")
+    ]
+    recent_source = Path(recent_projects.__file__).read_text(encoding="utf-8")
+
+    assert "RecentProjectsMixin" in main_source
+    assert "self.add_recent_projects_widget(toolbar)" in toolbar_source
+    assert "self._remember_recent_workspace(path)" in workspace_source
+    assert "QToolButton.ToolButtonPopupMode.InstantPopup" in recent_source
+    assert "aboutToShow.connect(self._refresh_recent_projects_menu)" in recent_source
+    assert "Cancella elenco recenti" in recent_source
+
+
+def test_recent_projects_labels_are_translated() -> None:
+    from local_ai_bridge.i18n import configure_language, tr
+
+    configure_language("en")
+    assert tr("Recenti") == "Recent"
+    assert tr("Nessun progetto recente") == "No recent projects"
+    assert tr("Cancella elenco recenti") == "Clear recent projects"
+    assert tr("{name} (non disponibile)").format(name="Example").endswith("(unavailable)")
+    configure_language("it")
+
+
+def test_advanced_tab_contains_optional_browser_extension_settings() -> None:
+    from local_ai_bridge.ui.tabs import advanced
+
+    source = Path(advanced.__file__).read_text(encoding="utf-8")
+    assert "QGroupBox(_('Automazione browser'))" in source
+    assert "browser_extension_enabled_check" in source
+    assert "browser_extension_auto_send_check" in source
+    assert "browser_extension_auto_receive_check" in source
+    assert "browser_extension_auto_export_check" in source
+    assert "browser_extension_auto_download_check" in source
+    assert "La sottocartella degli ZIP si configura nelle opzioni" in source
+    assert "Gli aggiornamenti non vengono mai applicati automaticamente" in source

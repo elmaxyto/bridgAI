@@ -135,16 +135,45 @@ Quando usi un reverse proxy sullo stesso host, puoi lasciare BridgAI in ascolto 
 
 Esegui il servizio con un utente Linux dedicato e senza privilegi amministrativi. Concedigli accesso solo alla directory dei progetti e alla propria directory dati.
 
+## Automazione browser controllata dal telefono
+
+La Web UI può accodare il Super-Report a un browser Chrome fidato anche quando
+BridgAI gira su un server. Il telefono resta il pannello di controllo; ChatGPT viene
+eseguito nel browser desktop che possiede già la sessione utente. Le credenziali
+ChatGPT non vengono trasferite né salvate sul server.
+
+Requisiti:
+
+- BridgAI Web raggiungibile dal browser fidato tramite un'origine HTTPS;
+- estensione BridgAI 0.2.0 o successiva installata su Chrome desktop;
+- Chrome acceso e collegato allo stesso server;
+- accesso Web UI già protetto con token oppure username/password e, se possibile, 2FA.
+
+Configurazione:
+
+1. Apri **Automazione browser da server** nella Web UI.
+2. Premi **Genera o ruota token**. La rotazione revoca immediatamente il token precedente.
+3. Nell'estensione inserisci l'origine HTTPS mostrata, senza percorsi, e il token generato.
+4. Salva e verifica. Chrome chiede il permesso soltanto per l'origine HTTPS scelta.
+5. Prepara il Super-Report dal telefono e premi **Invia automaticamente a ChatGPT**.
+
+L'estensione esegue sul browser fidato lo stesso ciclo locale: invio prompt, richieste
+multiple `#scarica`, caricamento dei contesti e ricezione dello ZIP finale. Quando lo
+ZIP arriva, il server lo analizza e la Web UI mostra automaticamente checklist e diff.
+L'applicazione resta sempre manuale.
+
+Non usare HTTP per un browser remoto. L'estensione accetta HTTP soltanto verso
+`127.0.0.1` o `localhost`. L'API remota dell'estensione richiede inoltre un
+token dedicato di almeno 32 caratteri e deve essere abilitata esplicitamente dalla Web UI.
+
 ## Uso dal telefono
 
 1. Apri il pannello HTTPS o l'indirizzo privato VPN.
-2. Inserisci il token; resta nella sola sessione del browser.
-3. Seleziona un progetto esistente, creane uno oppure clona un repository.
-4. Genera e copia il Super-Report in ChatGPT.
-5. Incolla la riga `#scarica` e scarica lo ZIP sul telefono.
-6. Allega lo ZIP a ChatGPT.
-7. Carica nel pannello lo ZIP restituito oppure incolla la patch SEARCH/REPLACE.
-8. Controlla il diff, applica, esegui i test e verifica Git.
+2. Accedi e seleziona un progetto esistente, creane uno oppure clona un repository.
+3. Genera il Super-Report.
+4. Con un browser fidato collegato, premi **Invia automaticamente a ChatGPT**; in alternativa usa il flusso manuale.
+5. Attendi che la Web UI mostri lo ZIP ricevuto e l'anteprima delle modifiche.
+6. Controlla il diff, applica manualmente, esegui i test e verifica Git.
 
 ## Autenticazione a due fattori TOTP
 

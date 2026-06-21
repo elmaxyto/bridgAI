@@ -131,3 +131,29 @@ def test_remote_server_receives_binding_and_credentials(monkeypatch, tmp_path: P
     assert command[-4:] == ["--host", "0.0.0.0", "--workspace-root", str(tmp_path)]
     assert kwargs["env"]["BRIDGAI_WEB_USERNAME"] == "admin"
     assert kwargs["env"]["BRIDGAI_WEB_PASSWORD_HASH"].startswith("pbkdf2_sha256$")
+
+
+def test_browser_extension_status_uses_dedicated_token(monkeypatch) -> None:
+    class Response:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def read(self):
+            return b'{"enabled": true, "application_version": "1.0.0"}'
+
+    captured = {}
+
+    def fake_urlopen(request, timeout):
+        captured["request"] = request
+        captured["timeout"] = timeout
+        return Response()
+
+    monkeypatch.setattr(launcher.urllib.request, "urlopen", fake_urlopen)
+    payload = launcher.browser_extension_service_status(8765, "t" * 40)
+    assert payload["enabled"] is True
+    assert captured["request"].get_header("X-bridgai-extension-token") == "t" * 40

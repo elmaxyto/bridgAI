@@ -262,3 +262,158 @@ def test_private_lan_can_skip_second_factor_when_explicitly_enabled(tmp_path: Pa
         server.shutdown()
         server.server_close()
         thread.join(timeout=5)
+
+
+def test_remote_web_ui_can_configure_and_queue_browser_automation(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+    web_token = "w" * 32
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    security = WebSecurityConfig.build(
+        host="0.0.0.0",
+        auth_token=web_token,
+        fixed_workspace=workspace,
+    )
+    state = BridgeState(security=security)
+    server = BridgeHTTPServer(("127.0.0.1", 0), state)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base = f"http://127.0.0.1:{server.server_address[1]}"
+    try:
+        status, payload = _json_request(
+            base + "/api/browser-automation/configure",
+            method="POST",
+            payload={"confirm": "ROTATE_EXTENSION_TOKEN"},
+            token=web_token,
+            csrf=state.csrf_token,
+        )
+        assert status == 200
+        assert payload["enabled"] is True
+        assert payload["remote_access"] is True
+        assert len(payload["token"]) >= 32
+
+        status, payload = _json_request(
+            base + "/api/browser-automation/queue",
+            method="POST",
+            payload={"report": "Super report for ChatGPT"},
+            token=web_token,
+            csrf=state.csrf_token,
+        )
+        assert status == 200
+        assert payload["request_id"]
+
+        status, payload = _json_request(
+            base + "/api/browser-automation/status",
+            method="POST",
+            payload={},
+            token=web_token,
+            csrf=state.csrf_token,
+        )
+        assert status == 200
+        assert payload["enabled"] is True
+        assert payload["remote_access"] is True
+        assert payload["token_configured"] is True
+        assert payload["request"]["status"] == "queued"
+        assert payload["busy"] is True
+
+        status, payload = _json_request(
+            base + "/api/browser-automation/queue",
+            method="POST",
+            payload={"report": "replacement without confirmation"},
+            token=web_token,
+            csrf=state.csrf_token,
+        )
+        assert status == 400
+        assert "già in corso" in payload["error"]
+
+        status, payload = _json_request(
+            base + "/api/browser-automation/queue",
+            method="POST",
+            payload={"report": "replacement confirmed", "replace": True},
+            token=web_token,
+            csrf=state.csrf_token,
+        )
+        assert status == 200
+        assert payload["request_id"]
+
+        status, payload = _json_request(
+            base + "/api/browser-automation/disable",
+            method="POST",
+            payload={"confirm": "DISABLE_EXTENSION"},
+            token=web_token,
+            csrf=state.csrf_token,
+        )
+        assert status == 200
+        assert payload["enabled"] is False
+        assert state.settings.browser_extension_token == ""
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+def test_browser_automation_hides_plan_after_workspace_switch(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+    web_token = "q" * 32
+    root = tmp_path / "workspaces"
+    first = root / "first"
+    second = root / "second"
+    first.mkdir(parents=True)
+    second.mkdir()
+    security = WebSecurityConfig.build(
+        host="0.0.0.0",
+        auth_token=web_token,
+        workspace_root=root,
+    )
+    state = BridgeState(security=security, initial_workspace=first)
+    server = BridgeHTTPServer(("127.0.0.1", 0), state)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base = f"http://127.0.0.1:{server.server_address[1]}"
+    try:
+        status, _ = _json_request(
+            base + "/api/browser-automation/configure",
+            method="POST",
+            payload={"confirm": "ROTATE_EXTENSION_TOKEN"},
+            token=web_token,
+            csrf=state.csrf_token,
+        )
+        assert status == 200
+        status, _ = _json_request(
+            base + "/api/browser-automation/queue",
+            method="POST",
+            payload={"report": "request for first workspace"},
+            token=web_token,
+            csrf=state.csrf_token,
+        )
+        assert status == 200
+
+        status, _ = _json_request(
+            base + "/api/workspace",
+            method="POST",
+            payload={"path": "second"},
+            token=web_token,
+            csrf=state.csrf_token,
+        )
+        assert status == 200
+        status, payload = _json_request(
+            base + "/api/browser-automation/status",
+            method="POST",
+            payload={},
+            token=web_token,
+            csrf=state.csrf_token,
+        )
+        assert status == 200
+        assert payload["request"]["status"] == "other_workspace"
+        assert "altro progetto" in payload["request"]["message"]
+        assert payload.get("plan") is None
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)

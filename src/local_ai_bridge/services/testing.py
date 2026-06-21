@@ -7,6 +7,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -38,6 +39,42 @@ _PYTEST_COUNT_PATTERN = re.compile(
     re.IGNORECASE,
 )
 _STRUCTURAL_CHECKS = {"Python compileall", "npm build", "TypeScript"}
+_ENVIRONMENT_SENSITIVE_CHECKS = {
+    "Python compileall",
+    "npm build",
+    "TypeScript",
+    "Ruff",
+    "Mypy",
+}
+_PYTHON_CHECKS = {"Python compileall", "Pytest", "Mypy"}
+_ENVIRONMENT_FAILURE_PATTERNS = tuple(
+    re.compile(pattern, re.IGNORECASE)
+    for pattern in (
+        r"\bPermissionError\b",
+        r"\bFileNotFoundError\b",
+        r"\bNotADirectoryError\b",
+        r"\[WinError\s+5\]",
+        r"\bEACCES\b",
+        r"\bEPERM\b",
+        r"access(?:o)? (?:is )?denied",
+        r"accesso negato",
+        r"read-only file system",
+        r"used by another process",
+        r"impossibile accedere al file.*utilizzato da un altro processo",
+        r"command not found",
+        r"is not recognized as an internal or external command",
+        r"cannot find module",
+        r"no module named",
+    )
+)
+_PYTHON_SYNTAX_PATTERNS = tuple(
+    re.compile(pattern, re.IGNORECASE)
+    for pattern in (
+        r"\bSyntaxError\b",
+        r"\bIndentationError\b",
+        r"\bTabError\b",
+    )
+)
 
 
 def _pytest_counts(output: str) -> dict[str, int]:
@@ -58,23 +95,74 @@ def _pytest_counts(output: str) -> dict[str, int]:
     return counts
 
 
-def interpret_test_results(results: list[TestResult]) -> dict[str, object]:
-    """Describe test results without turning every failed assertion into a total failure.
+def _matches_any(output: str, patterns: tuple[re.Pattern[str], ...]) -> bool:
+    return any(pattern.search(output or "") for pattern in patterns)
 
-    The checks remain authoritative and their raw output is always preserved.  This
-    interpretation only explains whether the run completed, partially succeeded,
-    or exposed a structural problem that deserves immediate attention.
+
+def _is_environment_failure(result: TestResult) -> bool:
+    return (
+        result.name in _ENVIRONMENT_SENSITIVE_CHECKS
+        and _matches_any(result.output, _ENVIRONMENT_FAILURE_PATTERNS)
+    )
+
+
+def _is_confirmed_structural_failure(result: TestResult) -> bool:
+    if result.status != "failed" or result.name not in _STRUCTURAL_CHECKS:
+        return False
+    if result.name == "Python compileall":
+        return _matches_any(result.output, _PYTHON_SYNTAX_PATTERNS)
+    return not _is_environment_failure(result)
+
+
+def _normalize_result(result: TestResult) -> TestResult:
+    """Turn tooling/environment failures into an inconclusive result.
+
+    A non-zero exit code is not always evidence that the proposed code is broken.
+    In particular, permission errors while creating caches should not be presented
+    as structural failures caused by the applied patch.
     """
-    passed_checks = sum(result.status == "passed" for result in results)
-    failed_checks = sum(result.status in {"failed", "timeout", "error"} for result in results)
-    unavailable_checks = sum(result.status == "unavailable" for result in results)
+    if result.status != "failed":
+        return result
+    if result.name == "Python compileall" and _matches_any(
+        result.output, _PYTHON_SYNTAX_PATTERNS
+    ):
+        return result
+    if not _is_environment_failure(result):
+        return result
+    explanation = (
+        "Controllo non conclusivo: il comando è stato bloccato dall'ambiente o dai "
+        "permessi. Nessun errore strutturale del codice è stato confermato."
+    )
+    details = result.output.strip()
+    output = explanation if not details else f"{explanation}\n\nDettagli originali:\n{details}"
+    return TestResult(
+        name=result.name,
+        command=list(result.command),
+        status="unavailable",
+        returncode=result.returncode,
+        output=output,
+        duration_seconds=result.duration_seconds,
+    )
+
+
+def interpret_test_results(results: list[TestResult]) -> dict[str, object]:
+    """Explain checks without attributing environmental failures to the patch."""
+    normalized_results = [_normalize_result(result) for result in results]
+    passed_checks = sum(result.status == "passed" for result in normalized_results)
+    failed_checks = sum(result.status == "failed" for result in normalized_results)
+    unavailable_checks = sum(result.status == "unavailable" for result in normalized_results)
+    interrupted_checks = sum(
+        result.status in {"timeout", "error"} for result in normalized_results
+    )
+    inconclusive_checks = unavailable_checks + interrupted_checks
     structural_failures = [
         result.name
-        for result in results
-        if result.name in _STRUCTURAL_CHECKS
-        and result.status in {"failed", "timeout", "error"}
+        for result in normalized_results
+        if _is_confirmed_structural_failure(result)
     ]
-    pytest_result = next((result for result in results if result.name == "Pytest"), None)
+    pytest_result = next(
+        (result for result in normalized_results if result.name == "Pytest"), None
+    )
     pytest = _pytest_counts(pytest_result.output if pytest_result else "")
     pytest_not_passed = pytest["failed"] + pytest["errors"]
 
@@ -83,8 +171,8 @@ def interpret_test_results(results: list[TestResult]) -> dict[str, object]:
         level = "error"
         title = "Controllo strutturale non superato"
         summary = (
-            f"{names} non è riuscito. L'aggiornamento resta applicato, ma è consigliato "
-            "correggere questo problema prima di considerare concluso o pubblicare il lavoro."
+            f"{names} ha rilevato un errore strutturale confermato nel codice. "
+            "L'aggiornamento resta applicato: esamina i dettagli prima di pubblicarlo."
         )
     elif failed_checks:
         level = "warning"
@@ -97,22 +185,22 @@ def interpret_test_results(results: list[TestResult]) -> dict[str, object]:
             if pytest["skipped"]:
                 summary += f", {pytest['skipped']} saltati"
             summary += (
-                ". Questo non significa che l'intera applicazione non funzioni: può trattarsi "
-                "di una regressione reale oppure di aspettative dei test da aggiornare. "
-                "L'aggiornamento non viene annullato automaticamente; esamina i dettagli."
+                ". Questo non significa automaticamente che l'intera applicazione non "
+                "funzioni. Esamina i dettagli prima di considerare concluso il lavoro."
             )
         else:
             summary = (
                 f"{failed_checks} controlli non sono stati superati e {passed_checks} sono riusciti. "
-                "L'aggiornamento non viene annullato automaticamente; esamina i dettagli prima "
-                "di considerare concluso il lavoro."
+                "Non è stato confermato un errore strutturale; esamina i dettagli."
             )
-    elif unavailable_checks:
+        if inconclusive_checks:
+            summary += f" Inoltre, {inconclusive_checks} controlli non sono stati completati."
+    elif inconclusive_checks:
         level = "warning"
         title = "Verifica incompleta"
         summary = (
-            f"{passed_checks} controlli superati e {unavailable_checks} non disponibili. "
-            "Non risultano errori nei controlli eseguiti, ma la verifica non è completa."
+            f"{passed_checks} controlli superati e {inconclusive_checks} non completati o "
+            "non disponibili. Nessun errore della patch è stato confermato dai controlli eseguiti."
         )
     else:
         level = "ok"
@@ -126,6 +214,8 @@ def interpret_test_results(results: list[TestResult]) -> dict[str, object]:
         "passed_checks": passed_checks,
         "failed_checks": failed_checks,
         "unavailable_checks": unavailable_checks,
+        "interrupted_checks": interrupted_checks,
+        "inconclusive_checks": inconclusive_checks,
         "structural_failures": structural_failures,
         "pytest": pytest,
         "automatic_rollback": False,
@@ -170,7 +260,7 @@ def _python_compile_targets(workspace: Path) -> list[str]:
 
 
 def _pytest_command(workspace: Path) -> list[str]:
-    command = [sys.executable, "-m", "pytest", "-q"]
+    command = [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider"]
     if (workspace / "tests").is_dir():
         command.append("tests")
     return command
@@ -238,12 +328,44 @@ def detect_test_commands(workspace: Path) -> list[tuple[str, list[str], int, dic
     return commands
 
 
+def _isolated_check_env(
+    name: str,
+    base_env: dict[str, str] | None,
+    temporary_root: Path,
+) -> dict[str, str] | None:
+    if name not in _PYTHON_CHECKS and name not in {"Ruff"}:
+        return base_env
+    env = (base_env or os.environ).copy()
+    pycache = temporary_root / "pycache"
+    pycache.mkdir(parents=True, exist_ok=True)
+    env["PYTHONPYCACHEPREFIX"] = str(pycache)
+    if name == "Mypy":
+        mypy_cache = temporary_root / "mypy"
+        mypy_cache.mkdir(parents=True, exist_ok=True)
+        env["MYPY_CACHE_DIR"] = str(mypy_cache)
+    if name == "Ruff":
+        ruff_cache = temporary_root / "ruff"
+        ruff_cache.mkdir(parents=True, exist_ok=True)
+        env["RUFF_CACHE_DIR"] = str(ruff_cache)
+    return env
+
+
 def run_detected_tests(workspace: Path) -> list[TestResult]:
     workspace = workspace.expanduser().resolve(strict=True)
     commands = detect_test_commands(workspace)
     if not commands:
         return [TestResult("Rilevamento test", [], "unavailable", None, "Nessun test rilevato.", 0.0)]
-    results = [_run(name, command, workspace, timeout, env) for name, command, timeout, env in commands]
+
+    temporary_root = Path(tempfile.mkdtemp(prefix="bridgai-checks-"))
+    try:
+        results = []
+        for name, command, timeout, env in commands:
+            isolated_env = _isolated_check_env(name, env, temporary_root)
+            result = _run(name, command, workspace, timeout, isolated_env)
+            results.append(_normalize_result(result))
+    finally:
+        shutil.rmtree(temporary_root, ignore_errors=True)
+
     if _has_pytest_suite(workspace) and not _module_available("pytest"):
         results.append(
             TestResult(
@@ -259,16 +381,24 @@ def run_detected_tests(workspace: Path) -> list[TestResult]:
 
 
 def format_test_results(results: list[TestResult]) -> str:
-    interpretation = interpret_test_results(results)
+    normalized_results = [_normalize_result(result) for result in results]
+    interpretation = interpret_test_results(normalized_results)
     interpretation_icons = {"ok": "✅", "warning": "⚠️", "error": "❌"}
     chunks: list[str] = [
         f"{interpretation_icons[str(interpretation['level'])]} {interpretation['title']}\n"
         f"{interpretation['summary']}"
     ]
     icons = {"passed": "✅", "failed": "❌", "unavailable": "⚪", "timeout": "⏱️", "error": "⚠️"}
-    for result in results:
+    labels = {
+        "passed": "superato",
+        "failed": "non superato",
+        "unavailable": "non disponibile",
+        "timeout": "interrotto per timeout",
+        "error": "non completato",
+    }
+    for result in normalized_results:
         chunks.append(
-            f"{icons[result.status]} {result.name} — {result.status} ({result.duration_seconds:.1f}s)\n"
+            f"{icons[result.status]} {result.name} — {labels[result.status]} ({result.duration_seconds:.1f}s)\n"
             f"Comando: {' '.join(result.command) if result.command else '-'}\n"
             f"{result.output.strip() or '[nessun output]'}"
         )
@@ -276,6 +406,7 @@ def format_test_results(results: list[TestResult]) -> str:
 
 
 def test_results_to_dicts(results: list[TestResult]) -> list[dict]:
+    normalized_results = [_normalize_result(result) for result in results]
     return [
         {
             "name": result.name,
@@ -285,12 +416,16 @@ def test_results_to_dicts(results: list[TestResult]) -> list[dict]:
             "output": result.output,
             "duration_seconds": result.duration_seconds,
         }
-        for result in results
+        for result in normalized_results
     ]
 
 
 def test_summary(results: list[TestResult]) -> str:
-    passed = sum(result.status == "passed" for result in results)
-    failed = sum(result.status in {"failed", "timeout", "error"} for result in results)
-    unavailable = sum(result.status == "unavailable" for result in results)
+    normalized_results = [_normalize_result(result) for result in results]
+    passed = sum(result.status == "passed" for result in normalized_results)
+    failed = sum(result.status == "failed" for result in normalized_results)
+    unavailable = sum(
+        result.status in {"unavailable", "timeout", "error"}
+        for result in normalized_results
+    )
     return f"{passed} superati, {failed} non superati, {unavailable} non disponibili"

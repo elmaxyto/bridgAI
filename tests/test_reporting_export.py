@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import shutil
+import subprocess
 import zipfile
 from pathlib import Path
 
@@ -201,6 +203,74 @@ def test_scanner_skips_excluded_dirs_case_insensitively(tmp_path: Path) -> None:
     assert "SECRET_MARKER" not in report
 
 
+def test_scanner_excludes_generated_gradle_and_dependency_trees(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from local_ai_bridge.services import project_scanner
+
+    source = tmp_path / "src"
+    source.mkdir()
+    (source / "main.ts").write_text(
+        "export function startRoadtrip() { return true; }\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "package.json").write_text(
+        '{"name":"roadtrip","version":"1.0.0"}',
+        encoding="utf-8",
+    )
+
+    gradle_cache = tmp_path / ".gradle-build-aab"
+    nested = gradle_cache
+    for index in range(12):
+        nested = nested / f"cache-{index}"
+        nested.mkdir(parents=True)
+        (nested / "generated.ts").write_text(
+            "export function GENERATED_NOISE() {}\n",
+            encoding="utf-8",
+        )
+    dependencies = tmp_path / "node_modules" / "example"
+    dependencies.mkdir(parents=True)
+    (dependencies / "index.js").write_text(
+        "function DEPENDENCY_NOISE() {}\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(project_scanner, "MAX_DISCOVERED_DIRS", 4)
+    report = build_super_report(tmp_path)
+
+    assert "startRoadtrip" in report
+    assert ".gradle-build-aab" not in report
+    assert "node_modules" not in report
+    assert "GENERATED_NOISE" not in report
+    assert "DEPENDENCY_NOISE" not in report
+    assert "Scansione filesystem interrotta" not in report
+    assert "Sottoalberi tecnici esclusi:** 2" in report
+
+
+def test_scanner_keeps_priority_source_files_when_discovery_is_truncated(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from local_ai_bridge.services import project_scanner
+
+    source = tmp_path / "src"
+    source.mkdir()
+    (source / "main.py").write_text(
+        "def preserved_entrypoint():\n    return True\n",
+        encoding="utf-8",
+    )
+    noisy = tmp_path / "aaa-unclassified-cache"
+    noisy.mkdir()
+    (noisy / "payload.py").write_text("VALUE = 1\n", encoding="utf-8")
+
+    monkeypatch.setattr(project_scanner, "MAX_DISCOVERED_DIRS", 2)
+    result = project_scanner.scan_project(tmp_path)
+
+    assert result.scanned_files == 1
+    assert "src/main.py" in result.summaries
+    assert "preserved_entrypoint" in result.summaries
+    assert any("Conservati 1 file già individuati" in item for item in result.diagnostics)
+
+
 def test_project_ignore_excludes_files_directories_candidates_and_notes(tmp_path: Path) -> None:
     config = tmp_path / ".bridgai"
     config.mkdir()
@@ -301,3 +371,487 @@ def test_report_can_include_composed_prompt_preset(tmp_path: Path) -> None:
     assert "Correggi il problema." in report
     assert "Preset selezionato: Refactor sicuro" in report
     assert "senza sostituirlo" in report
+
+
+def test_scanner_excludes_noise_from_common_development_ecosystems(tmp_path: Path) -> None:
+    source = tmp_path / "src"
+    source.mkdir()
+    (source / "main.kt").write_text(
+        "fun main() { println(\"clean-source\") }\n",
+        encoding="utf-8",
+    )
+    (source / "ui.tsx").write_text(
+        "export function CleanUi() { return null; }\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "build.gradle.kts").write_text(
+        'plugins { kotlin("jvm") version "2.0.0" }\n',
+        encoding="utf-8",
+    )
+
+    noise = {
+        ".venv/lib/site-packages/pkg/module.py": "VENV_NOISE = True\n",
+        "node_modules/pkg/index.js": "const NODE_NOISE = true;\n",
+        ".gradle-build-release/caches/generated.kt": "val GRADLE_NOISE = true\n",
+        "target/generated/source.rs": "const TARGET_NOISE: bool = true;\n",
+        "dist/app.min.js": "const DIST_NOISE=true;\n",
+        "coverage/lcov.info": "COVERAGE_NOISE\n",
+        ".yarn/cache/package.zip": "YARN_NOISE\n",
+        "Pods/Library/source.m": "PODS_NOISE\n",
+        "tmp/debug.log": "TEMP_NOISE\n",
+    }
+    for relative, content in noise.items():
+        path = tmp_path / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
+
+    report = build_super_report(tmp_path)
+
+    assert "clean-source" in report
+    assert "CleanUi" in report
+    assert "build.gradle.kts" in report
+    for marker in (
+        "VENV_NOISE", "NODE_NOISE", "GRADLE_NOISE", "TARGET_NOISE",
+        "DIST_NOISE", "COVERAGE_NOISE", "YARN_NOISE", "PODS_NOISE",
+        "TEMP_NOISE",
+    ):
+        assert marker not in report
+    assert "Sottoalberi tecnici esclusi:" in report
+    assert "Dettaglio esclusioni:" in report
+
+
+def test_scanner_detects_renamed_python_virtual_environment(tmp_path: Path) -> None:
+    source = tmp_path / "src"
+    source.mkdir()
+    (source / "app.py").write_text("def app_marker():\n    return True\n", encoding="utf-8")
+
+    runtime = tmp_path / "python-runtime-311"
+    runtime.mkdir()
+    (runtime / "pyvenv.cfg").write_text("home = /usr/bin\n", encoding="utf-8")
+    (runtime / "hidden.py").write_text("RENAMED_VENV_NOISE = True\n", encoding="utf-8")
+
+    report = build_super_report(tmp_path)
+
+    assert "app_marker" in report
+    assert "RENAMED_VENV_NOISE" not in report
+    assert "ambiente virtuale rilevato" in report
+
+
+def test_scanner_excludes_compiled_temporary_and_generated_files_inside_source(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "src"
+    source.mkdir()
+    (source / "app.ts").write_text(
+        "export function retainedSource() { return true; }\n",
+        encoding="utf-8",
+    )
+    (source / "app.min.js").write_text("const MINIFIED_NOISE=true;", encoding="utf-8")
+    (source / "app.js.map").write_text('{"MAP_NOISE":true}', encoding="utf-8")
+    (source / "cache.pyc").write_bytes(b"PYC_NOISE")
+    (source / "debug.log").write_text("LOG_NOISE", encoding="utf-8")
+    (source / "model_pb2.py").write_text("PROTO_NOISE = True\n", encoding="utf-8")
+
+    report = build_super_report(tmp_path)
+
+    assert "retainedSource" in report
+    for name in ("app.min.js", "app.js.map", "cache.pyc", "debug.log", "model_pb2.py"):
+        assert name not in report
+    for marker in ("MINIFIED_NOISE", "MAP_NOISE", "PYC_NOISE", "LOG_NOISE", "PROTO_NOISE"):
+        assert marker not in report
+    assert "File tecnici esclusi:" in report
+
+
+def test_non_code_assets_do_not_consume_relevant_file_limit(tmp_path: Path, monkeypatch) -> None:
+    from local_ai_bridge.services import project_scanner
+
+    assets = tmp_path / "assets"
+    assets.mkdir()
+    for index in range(30):
+        (assets / f"image-{index:02d}.png").write_bytes(b"not-a-real-png")
+
+    source = tmp_path / "src"
+    source.mkdir()
+    (source / "main.py").write_text(
+        "def source_survives_asset_noise():\n    return True\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(project_scanner, "MAX_DISCOVERED_FILES", 1)
+    result = project_scanner.scan_project(tmp_path)
+
+    assert "source_survives_asset_noise" in result.summaries
+    assert result.scanned_files == 1
+    assert not any("limite massimo di file" in item for item in result.diagnostics)
+
+
+def test_dependency_lockfiles_are_compacted_instead_of_expanded(tmp_path: Path) -> None:
+    (tmp_path / "package.json").write_text(
+        '{"name":"demo","version":"1.0.0"}',
+        encoding="utf-8",
+    )
+    marker = "LOCKFILE_CONTENT_THAT_MUST_NOT_BE_EXPANDED"
+    (tmp_path / "package-lock.json").write_text(
+        '{"name":"demo","packages":{"node_modules/example":{"marker":"'
+        + marker
+        + '"}}}',
+        encoding="utf-8",
+    )
+
+    report = build_super_report(tmp_path)
+
+    assert "package-lock.json" in report
+    assert "contenuto non espanso nel report" in report
+    assert marker not in report
+
+
+def test_scanner_keeps_legitimate_cache_module_inside_source(tmp_path: Path) -> None:
+    source_cache = tmp_path / "src" / "cache"
+    source_cache.mkdir(parents=True)
+    (source_cache / "manager.py").write_text(
+        "def build_cache_key():\n    return 'kept'\n",
+        encoding="utf-8",
+    )
+    runtime_cache = tmp_path / "cache"
+    runtime_cache.mkdir()
+    (runtime_cache / "payload.py").write_text(
+        "def root_cache_noise():\n    return 'ignored'\n",
+        encoding="utf-8",
+    )
+
+    report = build_super_report(tmp_path)
+
+    assert "build_cache_key" in report
+    assert "src/cache/manager.py" in report
+    assert "root_cache_noise" not in report
+
+
+def test_git_manifest_respects_repository_ignore_rules(tmp_path: Path) -> None:
+    if shutil.which("git") is None:
+        return
+
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    (tmp_path / ".gitignore").write_text(
+        "custom-output/\n*.trace\n",
+        encoding="utf-8",
+    )
+    source = tmp_path / "src"
+    source.mkdir()
+    (source / "main.py").write_text(
+        "def git_visible_source():\n    return True\n",
+        encoding="utf-8",
+    )
+    ignored = tmp_path / "custom-output"
+    ignored.mkdir()
+    (ignored / "generated.py").write_text(
+        "def gitignored_noise():\n    return True\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "debug.trace").write_text("TRACE_NOISE", encoding="utf-8")
+
+    report = build_super_report(tmp_path)
+
+    assert "Modalità scansione:** manifest Git + filtri BridgAI" in report
+    assert "git_visible_source" in report
+    tree_section = report.split("## 10. Struttura reale del progetto", 1)[1].split(
+        "## 11. Firme, dipendenze e configurazioni principali", 1
+    )[0]
+    assert "custom-output/" not in tree_section
+    assert "debug.trace" not in tree_section
+    assert "gitignored_noise" not in report
+    assert "TRACE_NOISE" not in report
+
+
+def test_project_ignore_can_explicitly_reinclude_default_exclusions(tmp_path: Path) -> None:
+    config = tmp_path / ".bridgai"
+    config.mkdir()
+    (config / "ignore").write_text(
+        "!vendor/\n"
+        "!src/model_pb2.py\n",
+        encoding="utf-8",
+    )
+    vendor = tmp_path / "vendor"
+    vendor.mkdir()
+    (vendor / "local_library.py").write_text(
+        "def explicitly_included_vendor_code():\n    return True\n",
+        encoding="utf-8",
+    )
+    source = tmp_path / "src"
+    source.mkdir()
+    (source / "model_pb2.py").write_text(
+        "def explicitly_included_generated_code():\n    return True\n",
+        encoding="utf-8",
+    )
+
+    report = build_super_report(tmp_path)
+
+    assert "explicitly_included_vendor_code" in report
+    assert "explicitly_included_generated_code" in report
+
+
+def test_git_discovery_timeout_falls_back_to_filtered_filesystem(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    from local_ai_bridge.services import project_scanner
+
+    (tmp_path / ".git").mkdir()
+    source = tmp_path / "src"
+    source.mkdir()
+    (source / "main.ts").write_text(
+        "export function fallbackSourceMarker() { return true; }\n",
+        encoding="utf-8",
+    )
+    dependencies = tmp_path / "node_modules" / "pkg"
+    dependencies.mkdir(parents=True)
+    (dependencies / "index.js").write_text(
+        "export const FALLBACK_DEPENDENCY_NOISE = true;\n",
+        encoding="utf-8",
+    )
+
+    def timeout_manifest(*args, **kwargs):
+        raise project_scanner.GitDiscoveryBudgetExceeded(
+            "limite di tempo della scansione Git raggiunto"
+        )
+
+    monkeypatch.setattr(project_scanner, "git_manifest", timeout_manifest)
+
+    result = project_scanner.scan_project(tmp_path, time_budget=6.0)
+
+    assert result.discovery_mode == "filesystem filtrato (fallback Git)"
+    assert result.scanned_files == 1
+    assert "fallbackSourceMarker" in result.summaries
+    assert "FALLBACK_DEPENDENCY_NOISE" not in result.summaries
+    assert any("fallback sul filesystem filtrato" in item for item in result.diagnostics)
+    assert not any("Conservati 0 file" in item for item in result.diagnostics)
+
+
+def test_task_candidates_fall_back_when_git_discovery_times_out(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    from local_ai_bridge.services import project_scanner
+
+    (tmp_path / ".git").mkdir()
+    source = tmp_path / "src"
+    source.mkdir()
+    (source / "booking_service.ts").write_text(
+        "export function calculateBookingTotal() { return 42; }\n",
+        encoding="utf-8",
+    )
+
+    def timeout_manifest(*args, **kwargs):
+        raise project_scanner.GitDiscoveryBudgetExceeded(
+            "limite di tempo della scansione Git raggiunto"
+        )
+
+    monkeypatch.setattr(project_scanner, "git_manifest", timeout_manifest)
+
+    candidates = project_scanner.rank_task_candidates(
+        tmp_path,
+        "Correggi calculateBookingTotal nel booking service",
+    )
+
+    assert "src/booking_service.ts" in candidates
+
+
+def test_git_manifest_prefilters_dependency_paths_before_filesystem_checks(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    import time
+    from types import SimpleNamespace
+
+    from local_ai_bridge.services import project_scanner_git
+    from local_ai_bridge.services.project_scanner_policy import load_project_ignore
+
+    (tmp_path / ".git").mkdir()
+    source = tmp_path / "src"
+    source.mkdir()
+    source_file = source / "main.py"
+    source_file.write_text("VALUE = 1\n", encoding="utf-8")
+
+    dependencies = tmp_path / "node_modules" / "pkg"
+    dependencies.mkdir(parents=True)
+    dependency_file = dependencies / "index.js"
+    dependency_file.write_text("DEPENDENCY = true;\n", encoding="utf-8")
+
+    stdout = b"node_modules/pkg/index.js\0src/main.py\0"
+    monkeypatch.setattr(
+        project_scanner_git.subprocess,
+        "run",
+        lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout=stdout),
+    )
+
+    checked_paths: list[str] = []
+
+    def record_check(path: Path) -> bool:
+        checked_paths.append(path.relative_to(tmp_path).as_posix())
+        return False
+
+    monkeypatch.setattr(
+        project_scanner_git,
+        "_is_path_link_or_reparse",
+        record_check,
+    )
+
+    manifest = project_scanner_git.git_manifest(
+        tmp_path,
+        time.monotonic() + 5.0,
+        load_project_ignore(tmp_path),
+    )
+
+    assert manifest == [(source_file, "src/main.py")]
+    assert checked_paths == ["src/main.py"]
+
+
+def test_scanner_hides_local_android_credentials_and_machine_configuration(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "src"
+    source.mkdir()
+    (source / "main.ts").write_text(
+        "export function visibleProjectCode() { return true; }\n",
+        encoding="utf-8",
+    )
+    android = tmp_path / "android-build"
+    android.mkdir()
+    (android / "android.keystore").write_bytes(b"PRIVATE_KEY_MATERIAL")
+    (android / "local.properties").write_text(
+        "sdk.dir=C:\\\\private\\\\Android\\\\Sdk\n",
+        encoding="utf-8",
+    )
+
+    report = build_super_report(tmp_path)
+
+    assert "visibleProjectCode" in report
+    assert "android.keystore" not in report
+    assert "local.properties" not in report
+    assert "PRIVATE_KEY_MATERIAL" not in report
+    assert "C:\\\\private\\\\Android\\\\Sdk" not in report
+
+
+def test_scanner_excludes_scratch_and_generated_diagnostic_outputs(tmp_path: Path) -> None:
+    source = tmp_path / "src"
+    source.mkdir()
+    (source / "main.ts").write_text(
+        "export function productionEntry() { return true; }\n",
+        encoding="utf-8",
+    )
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    (scratch / "prototype.ts").write_text(
+        "export function SCRATCH_NOISE() { return false; }\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "final_report.txt").write_text(
+        "HISTORICAL_AI_OUTPUT",
+        encoding="utf-8",
+    )
+    (tmp_path / "tsc_output_2.txt").write_text(
+        "HISTORICAL_TSC_OUTPUT",
+        encoding="utf-8",
+    )
+
+    report = build_super_report(tmp_path)
+
+    assert "productionEntry" in report
+    assert "SCRATCH_NOISE" not in report
+    assert "HISTORICAL_AI_OUTPUT" not in report
+    assert "HISTORICAL_TSC_OUTPUT" not in report
+    assert "materiale sperimentale" in report
+    assert "output diagnostici generati" in report
+
+
+def test_summary_selection_balances_project_areas_and_reports_omissions(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    from local_ai_bridge.services import project_scanner
+    from local_ai_bridge.services import project_scanner_summary
+
+    (tmp_path / "package.json").write_text(
+        '{"name":"balanced-demo","version":"1.0.0"}',
+        encoding="utf-8",
+    )
+    for area, count in (("components", 12), ("services", 6), ("hooks", 6)):
+        directory = tmp_path / "src" / area
+        directory.mkdir(parents=True)
+        for index in range(count):
+            (directory / f"{area}_{index}.ts").write_text(
+                f"export function {area}_{index}() {{ return {index}; }}\n",
+                encoding="utf-8",
+            )
+    (tmp_path / "src" / "main.ts").write_text(
+        "export function mainEntry() { return true; }\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(project_scanner, "MAX_SUMMARY_FILES", 8)
+    monkeypatch.setattr(project_scanner_summary, "LARGE_CODE_RESERVE", 2)
+
+    result = project_scanner.scan_project(tmp_path)
+
+    assert result.scanned_files == 8
+    assert result.omitted_files > 0
+    assert "src/main.ts" in result.summaries
+    assert "src/components/" in result.summaries
+    assert "src/services/" in result.summaries
+    assert "src/hooks/" in result.summaries
+    assert any("Contesto sintetico:" in item for item in result.diagnostics)
+
+
+def test_git_manifest_tree_compacts_media_only_subtrees(tmp_path: Path) -> None:
+    from local_ai_bridge.services.project_scanner_git import tree_from_manifest
+
+    files = [
+        (tmp_path / f"public/assets/image-{index}.png", f"public/assets/image-{index}.png")
+        for index in range(5)
+    ]
+    files.append((tmp_path / "src/main.ts", "src/main.ts"))
+
+    tree, truncated = tree_from_manifest(
+        tmp_path,
+        files,
+        max_entries=100,
+        max_depth=20,
+    )
+
+    assert not truncated
+    assert "public/ [5 file multimediali]" in tree
+    assert "image-0.png" not in tree
+    assert "src/" in tree
+    assert "main.ts" in tree
+
+
+def test_git_status_hides_technical_paths_but_keeps_project_changes(tmp_path: Path) -> None:
+    from local_ai_bridge.services.reporting_git import compact_git_status
+
+    output = (
+        "## main...origin/main\n"
+        " M src/app.ts\n"
+        " M node_modules/example/index.js\n"
+        " M .gradle/cache.bin\n"
+    )
+
+    compact = compact_git_status(tmp_path, output)
+
+    assert "src/app.ts" in compact
+    assert "node_modules/example/index.js" not in compact
+    assert ".gradle/cache.bin" not in compact
+    assert "2 modifiche in percorsi tecnici omesse" in compact
+    assert "dipendenze installate: 1" in compact
+    assert "cache strumenti: 1" in compact
+
+
+def test_typescript_diagnostics_do_not_claim_python_validation(tmp_path: Path) -> None:
+    (tmp_path / "main.ts").write_text(
+        "export function start() { return true; }\n",
+        encoding="utf-8",
+    )
+
+    report = build_super_report(tmp_path)
+
+    assert "Parsing AST Python: nessun file Python incluso nel contesto sintetico." in report
+    assert "JavaScript/TypeScript: firme estratte euristicamente da 1 file" in report
+    assert "sintassi non validata durante il report" in report

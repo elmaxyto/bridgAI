@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import subprocess
 import time
 from datetime import datetime
 from pathlib import Path
@@ -14,6 +13,7 @@ from local_ai_bridge.services.project_scanner import (
     rank_task_candidates,
     scan_project,
 )
+from local_ai_bridge.services.reporting_git import git_snapshot
 
 
 NOTE_FILES = (
@@ -35,23 +35,6 @@ def _trace_report(message: str) -> None:
             stream.write(f"{datetime.now().isoformat(timespec='seconds')} | {message}\n")
     except OSError:
         pass
-
-
-def _git_snapshot(root: Path) -> str:
-    if not (root / ".git").exists():
-        return "Repository Git non rilevato."
-    try:
-        result = subprocess.run(
-            ["git", "status", "--short", "--branch"],
-            cwd=root,
-            capture_output=True,
-            text=True,
-            timeout=10,
-            check=False,
-        )
-        return (result.stdout + result.stderr).strip() or "Working tree pulita."
-    except Exception as exc:
-        return f"Git status non disponibile: {exc}"
 
 
 def _notes(root: Path) -> str:
@@ -95,19 +78,48 @@ def _candidate_section(root: Path, task: str) -> str:
     return "\n".join(f"- `{relative}`" for relative in candidates)
 
 
-def _diagnostics_text(diagnostics: list[str]) -> str:
-    base = (
+def _diagnostics_text(scan) -> str:
+    runtime = (
         "Import runtime: non verificati durante la generazione del report.\n"
         "Test del progetto: non eseguiti durante la generazione del report.\n"
         "Interfaccia grafica: non avviata durante la generazione del report."
     )
-    if diagnostics:
-        return (
-            "Parsing/scansione: completati con avvisi o errori parziali.\n"
-            + "\n".join(diagnostics[:100])
-            + "\n" + base
+    informational_prefixes = ("Contesto sintetico:", "Limite adattivo del contesto:")
+    informational = [
+        item for item in scan.diagnostics
+        if item.startswith(informational_prefixes)
+    ]
+    warnings = [
+        item for item in scan.diagnostics
+        if not item.startswith(informational_prefixes)
+    ]
+
+    rows = [
+        "Scansione: completata con avvisi." if warnings else "Scansione: completata."
+    ]
+    if scan.python_files:
+        if scan.python_syntax_errors:
+            rows.append(
+                f"Parsing AST Python: {scan.python_files} file analizzati, "
+                f"{scan.python_syntax_errors} errori sintattici rilevati."
+            )
+        else:
+            rows.append(
+                f"Parsing AST Python: {scan.python_files} file analizzati, nessun errore sintattico."
+            )
+    else:
+        rows.append("Parsing AST Python: nessun file Python incluso nel contesto sintetico.")
+
+    if scan.javascript_files:
+        rows.append(
+            f"JavaScript/TypeScript: firme estratte euristicamente da "
+            f"{scan.javascript_files} file; sintassi non validata durante il report."
         )
-    return "Parsing AST Python: completato senza errori sintattici nei file analizzati.\n" + base
+
+    rows.extend(informational)
+    rows.extend(warnings[:100])
+    rows.append(runtime)
+    return "\n".join(rows)
 
 
 def build_super_report(root: Path, task: str = "") -> str:
@@ -115,7 +127,7 @@ def build_super_report(root: Path, task: str = "") -> str:
     root = root.expanduser().resolve(strict=True)
     _trace_report(f"START workspace={root}")
     try:
-        scan = scan_project(root)
+        scan = scan_project(root, task=task)
         _trace_report(
             f"SCAN_DONE files={scan.scanned_files} skipped={scan.skipped_files} "
             f"elapsed={time.monotonic() - started:.2f}s"
@@ -162,7 +174,7 @@ def build_super_report(root: Path, task: str = "") -> str:
             if workspace_is_empty
             else ""
         )
-        git_text = _git_snapshot(root)
+        git_text = git_snapshot(root)
         notes_text = _notes(root)
         custom_instructions = _custom_instructions(root)
         elapsed = time.monotonic() - started
@@ -175,8 +187,14 @@ def build_super_report(root: Path, task: str = "") -> str:
 **Generatore report:** `BridgAI {__version__}`  
 **Workspace:** `{root}`  
 **Generato:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}  
+**Modalità scansione:** {scan.discovery_mode}  
 **File riassunti:** {scan.scanned_files}  
-**File saltati/troncati:** {scan.skipped_files}
+**File indicizzati ma non espansi:** {scan.omitted_files}  
+**Copertura `#scarica`:** tutti i file indicizzati restano richiedibili anche se non espansi nel report.  
+**File saltati/troncati:** {scan.skipped_files}  
+**Sottoalberi tecnici esclusi:** {scan.excluded_directories}  
+**File tecnici esclusi:** {scan.excluded_files}  
+**Dettaglio esclusioni:** {scan.exclusion_summary}
 
 ---
 
@@ -268,7 +286,7 @@ Per la sostituzione completa di un file, restituisci il contenuto integrale e in
 ## 9. Verifiche eseguite durante il report
 
 ```text
-{_diagnostics_text(scan.diagnostics)}
+{_diagnostics_text(scan)}
 ```
 
 Eventuali risultati presenti in README o documenti del repository sono informazioni storiche, non test rieseguiti in questa sessione.
@@ -280,6 +298,7 @@ Eventuali risultati presenti in README o documenti del repository sono informazi
 ```
 
 I percorsi mostrati in questa sezione sono relativi alla root del workspace e devono essere usati nei comandi `#scarica`.
+L'indice conserva i percorsi di codice e configurazione; soltanto i sottoalberi composti esclusivamente da file multimediali possono essere raggruppati.
 
 ## 11. Firme, dipendenze e configurazioni principali
 

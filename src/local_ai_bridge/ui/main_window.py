@@ -3,7 +3,7 @@ from local_ai_bridge.i18n import configure_language, tr as _
 from datetime import datetime
 from pathlib import Path
 from typing import Callable
-from PySide6.QtCore import QModelIndex, QThreadPool, Qt, QUrl
+from PySide6.QtCore import QModelIndex, QThreadPool, QTimer, Qt, QUrl
 from PySide6.QtGui import QAction, QCloseEvent, QDesktopServices, QDragEnterEvent, QDropEvent
 from PySide6.QtWidgets import (
     QApplication,
@@ -24,9 +24,11 @@ from local_ai_bridge.core.skills import SkillContext, SkillRegistry
 from local_ai_bridge.services.apply import ApplyService
 from local_ai_bridge.web.launcher import stop_web_interface
 from local_ai_bridge.skills.builtins import register_builtin_skills
+from local_ai_bridge.ui.browser_extension_actions import BrowserExtensionActionsMixin
 from local_ai_bridge.ui.change_actions import ChangeActionsMixin
 from local_ai_bridge.ui.github_actions import GitHubActionsMixin
 from local_ai_bridge.ui.layouts import build_central_ui
+from local_ai_bridge.ui.recent_projects import RecentProjectsMixin
 from local_ai_bridge.ui.theme import application_style
 from local_ai_bridge.ui.system_actions import SystemActionsMixin
 from local_ai_bridge.ui.settings_actions import SettingsActionsMixin
@@ -81,6 +83,8 @@ def _reset_project_ui(window) -> None:
 
     window.current_plan = None
     window._last_auto_copied_report = None
+    window._browser_extension_seen_response_id = ''
+    window._browser_extension_seen_update_path = ''
     pre_apply_summary = getattr(window, 'pre_apply_summary', None)
     if pre_apply_summary is not None:
         pre_apply_summary.setText(_('La checklist pre-applicazione apparirà dopo l’analisi del piano.'))
@@ -90,7 +94,7 @@ def _reset_project_ui(window) -> None:
         apply_button.setEnabled(False)
 
 
-class MainWindow(WorkflowActionsMixin, ChangeActionsMixin, SystemActionsMixin, SettingsActionsMixin, GitHubActionsMixin, ToolActionsMixin, QMainWindow):
+class MainWindow(WorkflowActionsMixin, BrowserExtensionActionsMixin, ChangeActionsMixin, SystemActionsMixin, SettingsActionsMixin, GitHubActionsMixin, ToolActionsMixin, RecentProjectsMixin, QMainWindow):
 
     def __init__(self) -> None:
         super().__init__()
@@ -118,6 +122,14 @@ class MainWindow(WorkflowActionsMixin, ChangeActionsMixin, SystemActionsMixin, S
         self._load_last_workspace()
         self._refresh_skills()
         self._refresh_sessions()
+        self._browser_extension_seen_response_id = ''
+        self._browser_extension_seen_update_path = ''
+        self.browser_extension_timer = QTimer(self)
+        self.browser_extension_timer.setInterval(1500)
+        self.browser_extension_timer.timeout.connect(self.poll_browser_extension)
+        self.browser_extension_timer.start()
+        self.refresh_browser_extension_settings()
+        QTimer.singleShot(0, self._start_browser_extension_if_enabled)
         self.apply_simple_mode()
 
 
@@ -258,6 +270,8 @@ class MainWindow(WorkflowActionsMixin, ChangeActionsMixin, SystemActionsMixin, S
         open_action.triggered.connect(self.choose_workspace)
         toolbar.addAction(open_action)
 
+        self.add_recent_projects_widget(toolbar)
+
         toolbar.addSeparator()
         toolbar.addWidget(QLabel(_('Progetto: ')))
         self.workspace_label = QLabel(_('Nessuno'))
@@ -368,7 +382,7 @@ class MainWindow(WorkflowActionsMixin, ChangeActionsMixin, SystemActionsMixin, S
         self.open_folder_action.setEnabled(True)
         self.file_tree.setRootIndex(self.file_model.setRootPath(str(path)))
         self.settings.last_workspace = str(path)
-        self.settings_store.save(self.settings)
+        self._remember_recent_workspace(path)
         self.refresh_prompt_settings()
         if not workspace_changed:
             self.current_plan = None

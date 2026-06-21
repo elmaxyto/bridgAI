@@ -1,6 +1,55 @@
 from pathlib import Path
 
-from local_ai_bridge.core.settings import AppSettings, SettingsStore
+from local_ai_bridge.core.settings import (
+    MAX_RECENT_WORKSPACES,
+    AppSettings,
+    SettingsStore,
+    normalize_recent_workspaces,
+    remember_recent_workspace,
+)
+
+
+def test_recent_workspaces_round_trip(tmp_path: Path) -> None:
+    store = SettingsStore()
+    store.path = tmp_path / "settings.json"
+    expected = [str(tmp_path / "project-b"), str(tmp_path / "project-a")]
+    store.save(AppSettings(recent_workspaces=expected))
+    assert store.load().recent_workspaces == expected
+
+
+def test_recent_workspaces_are_backward_compatible(tmp_path: Path) -> None:
+    store = SettingsStore()
+    store.path = tmp_path / "settings.json"
+    store.path.write_text('{"last_workspace": "C:/workspace"}', encoding="utf-8")
+    assert store.load().recent_workspaces == []
+
+
+def test_recent_workspaces_are_normalized_and_limited() -> None:
+    values: list[object] = [" /projects/current ", "", None, "/projects/current"]
+    values.extend(f"/projects/project-{index}" for index in range(MAX_RECENT_WORKSPACES + 3))
+    normalized = normalize_recent_workspaces(values)
+    assert normalized[0] == "/projects/current"
+    assert len(normalized) == MAX_RECENT_WORKSPACES
+    assert normalized.count("/projects/current") == 1
+
+
+def test_remember_recent_workspace_moves_project_to_front() -> None:
+    recent = ["/projects/one", "/projects/two", "/projects/three"]
+    assert remember_recent_workspace(recent, "/projects/two") == [
+        "/projects/two",
+        "/projects/one",
+        "/projects/three",
+    ]
+
+
+def test_recent_workspaces_ignore_invalid_persisted_values(tmp_path: Path) -> None:
+    store = SettingsStore()
+    store.path = tmp_path / "settings.json"
+    store.path.write_text(
+        '{"recent_workspaces": ["/projects/one", 42, "", "/projects/one"]}',
+        encoding="utf-8",
+    )
+    assert store.load().recent_workspaces == ["/projects/one"]
 
 
 def test_temp_directory_round_trip(tmp_path: Path) -> None:
@@ -363,3 +412,40 @@ def test_web_two_factor_settings_are_backward_compatible(tmp_path: Path) -> None
     assert loaded.web_totp_local_bypass is False
     assert loaded.web_totp_last_counter == -1
     assert loaded.web_totp_recovery_hashes == []
+
+
+def test_browser_extension_settings_round_trip(tmp_path: Path) -> None:
+    store = SettingsStore()
+    store.path = tmp_path / "settings.json"
+    settings = AppSettings(
+        browser_extension_enabled=True,
+        browser_extension_remote_access=True,
+        browser_extension_auto_send=False,
+        browser_extension_auto_receive=False,
+        browser_extension_auto_export=False,
+        browser_extension_auto_download=False,
+        browser_extension_token="token-value-with-at-least-thirty-two-characters",
+    )
+    store.save(settings)
+    loaded = store.load()
+    assert loaded.browser_extension_enabled is True
+    assert loaded.browser_extension_remote_access is True
+    assert loaded.browser_extension_auto_send is False
+    assert loaded.browser_extension_auto_receive is False
+    assert loaded.browser_extension_auto_export is False
+    assert loaded.browser_extension_auto_download is False
+    assert loaded.browser_extension_token == settings.browser_extension_token
+
+
+def test_browser_extension_settings_are_backward_compatible(tmp_path: Path) -> None:
+    store = SettingsStore()
+    store.path = tmp_path / "settings.json"
+    store.path.write_text('{"language": "it"}', encoding="utf-8")
+    loaded = store.load()
+    assert loaded.browser_extension_enabled is False
+    assert loaded.browser_extension_remote_access is False
+    assert loaded.browser_extension_auto_send is True
+    assert loaded.browser_extension_auto_receive is True
+    assert loaded.browser_extension_auto_export is True
+    assert loaded.browser_extension_auto_download is True
+    assert loaded.browser_extension_token == ""

@@ -18,6 +18,13 @@ from typing import Any
 
 from local_ai_bridge.services.git import GitIntegrationError
 from local_ai_bridge.services.pre_apply import build_pre_apply_summary
+from local_ai_bridge.web.browser_automation import dispatch_browser_automation_action
+from local_ai_bridge.web.extension_api import (
+    ExtensionResult,
+    authenticate_extension,
+    dispatch_get as dispatch_extension_get,
+    dispatch_post as dispatch_extension_post,
+)
 from local_ai_bridge.web.network import connection_status_payload
 from local_ai_bridge.web.page import render_favicon_svg, render_index, render_manifest
 from local_ai_bridge.web.project_actions import (
@@ -90,12 +97,34 @@ class BridgeHandler(BaseHTTPRequestHandler):
         self.send_header("X-Frame-Options", "DENY")
         self.send_header("Referrer-Policy", "no-referrer")
 
-    def _json(self, status: int, payload: dict[str, Any]) -> None:
+    def _send_extension_headers(self) -> None:
+        origin = (self.headers.get("Origin") or "").strip()
+        if origin == "https://chatgpt.com" or origin.startswith("chrome-extension://"):
+            self.send_header("Access-Control-Allow-Origin", origin)
+            self.send_header("Vary", "Origin")
+        self.send_header(
+            "Access-Control-Allow-Headers",
+            "Content-Type, X-BridgAI-Extension-Token, X-BridgAI-Extension-Version, "
+            "X-BridgAI-Request-ID, X-File-Name",
+        )
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        if self.headers.get("Access-Control-Request-Private-Network") == "true":
+            self.send_header("Access-Control-Allow-Private-Network", "true")
+
+    def _json(
+        self,
+        status: int,
+        payload: dict[str, Any],
+        *,
+        extension: bool = False,
+    ) -> None:
         data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(data)))
         self._send_security_headers()
+        if extension:
+            self._send_extension_headers()
         self.end_headers()
         self.wfile.write(data)
 
@@ -138,7 +167,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
         if write and self.headers.get("X-Local-Bridge-CSRF") != self.server.state.csrf_token:
             raise PermissionError("Token CSRF non valido.")
 
-    def _send_artifact(self, artifact_id: str) -> None:
+    def _send_artifact(self, artifact_id: str, *, extension: bool = False) -> None:
         artifact = self.server.state.get_artifact(artifact_id)
         size = artifact.path.stat().st_size
         filename = artifact.filename.replace('"', "_").replace("\r", "_").replace("\n", "_")
@@ -147,14 +176,54 @@ class BridgeHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(size))
         self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
         self._send_security_headers()
+        if extension:
+            self._send_extension_headers()
         self.end_headers()
         with artifact.path.open("rb") as stream:
             while chunk := stream.read(1024 * 128):
                 self.wfile.write(chunk)
 
+    def _require_extension_access(self):
+        client_ip = self._client_ip()
+        direct_is_loopback = is_loopback_address(self.client_address[0])
+        forwarded_proto = self.headers.get("X-Forwarded-Proto") or ""
+        proxy_reports_https = (
+            direct_is_loopback
+            and forwarded_proto.rsplit(",", 1)[-1].strip().lower() == "https"
+        )
+        # A reverse proxy may omit X-Forwarded-For while still terminating TLS.
+        # In that case do not accidentally classify its public request as local.
+        extension_client_ip = client_ip
+        if proxy_reports_https and is_loopback_address(client_ip):
+            extension_client_ip = "reverse-proxy-client"
+        return authenticate_extension(
+            extension_client_ip,
+            self.headers,
+            secure_transport=(
+                is_loopback_address(extension_client_ip) or proxy_reports_https
+            ),
+        )
+
+    def _send_extension_result(self, result: ExtensionResult) -> None:
+        if result.kind == "artifact":
+            self._send_artifact(result.artifact_id, extension=True)
+            return
+        self._json(HTTPStatus.OK, result.payload or {}, extension=True)
+
+    def do_OPTIONS(self) -> None:
+        if not urllib.parse.urlsplit(self.path).path.startswith("/api/extension/"):
+            self.send_response(HTTPStatus.NOT_FOUND)
+            self.end_headers()
+            return
+        self.send_response(HTTPStatus.NO_CONTENT)
+        self._send_security_headers()
+        self._send_extension_headers()
+        self.end_headers()
+
     def do_GET(self) -> None:
+        parsed = urllib.parse.urlsplit(self.path)
+        parsed_path = parsed.path
         try:
-            parsed = urllib.parse.urlsplit(self.path)
             if parsed.path == "/":
                 connection = connection_status_payload(
                     bind_host=str(self.server.server_address[0]),
@@ -190,6 +259,17 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 self.wfile.write(data)
                 return
 
+            if parsed.path.startswith("/api/extension/"):
+                settings = self._require_extension_access()
+                result = dispatch_extension_get(
+                    parsed.path,
+                    self.server.state,
+                    settings,
+                    application_version=APPLICATION_VERSION,
+                )
+                self._send_extension_result(result)
+                return
+
             if parsed.path == "/api/auth/info":
                 self._json(HTTPStatus.OK, self.server.state.auth_info(self._client_ip()))
                 return
@@ -213,15 +293,41 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 return
             self._json(HTTPStatus.NOT_FOUND, {"error": "Risorsa non trovata."})
         except PermissionError as exc:
-            self._json(HTTPStatus.UNAUTHORIZED, {"error": str(exc)})
+            self._json(
+                HTTPStatus.UNAUTHORIZED,
+                {"error": str(exc)},
+                extension=parsed_path.startswith("/api/extension/"),
+            )
         except FileNotFoundError as exc:
-            self._json(HTTPStatus.NOT_FOUND, {"error": str(exc)})
+            self._json(
+                HTTPStatus.NOT_FOUND,
+                {"error": str(exc)},
+                extension=parsed_path.startswith("/api/extension/"),
+            )
         except Exception as exc:
-            self._json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": f"{type(exc).__name__}: {exc}"})
+            self._json(
+                HTTPStatus.INTERNAL_SERVER_ERROR,
+                {"error": f"{type(exc).__name__}: {exc}"},
+                extension=parsed_path.startswith("/api/extension/"),
+            )
 
     def do_POST(self) -> None:
+        parsed_path = urllib.parse.urlsplit(self.path).path
         try:
-            if self.path == "/api/auth/login":
+            if parsed_path.startswith("/api/extension/"):
+                settings = self._require_extension_access()
+                result = dispatch_extension_post(
+                    parsed_path,
+                    self.server.state,
+                    settings,
+                    headers=self.headers,
+                    read_json=self._read_json,
+                    read_body=self._read_body,
+                    maximum_upload_bytes=MAX_UPLOAD_BYTES,
+                )
+                self._send_extension_result(result)
+                return
+            if parsed_path == "/api/auth/login":
                 if self.headers.get("X-Local-Bridge-CSRF") != self.server.state.csrf_token:
                     raise PermissionError("Token CSRF non valido.")
                 body = self._read_json()
@@ -239,7 +345,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
                     },
                 )
                 return
-            if self.path == "/api/auth/logout":
+            if parsed_path == "/api/auth/logout":
                 if self.headers.get("X-Local-Bridge-CSRF") != self.server.state.csrf_token:
                     raise PermissionError("Token CSRF non valido.")
                 self.server.state.revoke_auth_session(self.headers.get("Authorization"))
@@ -247,19 +353,31 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 return
 
             self._require_api_access(write=True)
-            if self.path == "/api/zip/upload":
+            if parsed_path == "/api/zip/upload":
                 payload = self._upload_zip()
             else:
-                payload = self._dispatch(self.path, self._read_json())
+                payload = self._dispatch(parsed_path, self._read_json())
             self._json(HTTPStatus.OK, payload)
         except AuthenticationRateLimitError as exc:
             self._json(HTTPStatus.TOO_MANY_REQUESTS, {"error": str(exc)})
         except PermissionError as exc:
-            self._json(HTTPStatus.FORBIDDEN, {"error": str(exc)})
+            self._json(
+                HTTPStatus.FORBIDDEN,
+                {"error": str(exc)},
+                extension=parsed_path.startswith("/api/extension/"),
+            )
         except (ValueError, FileNotFoundError, GitIntegrationError) as exc:
-            self._json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+            self._json(
+                HTTPStatus.BAD_REQUEST,
+                {"error": str(exc)},
+                extension=parsed_path.startswith("/api/extension/"),
+            )
         except Exception as exc:
-            self._json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": f"{type(exc).__name__}: {exc}"})
+            self._json(
+                HTTPStatus.INTERNAL_SERVER_ERROR,
+                {"error": f"{type(exc).__name__}: {exc}"},
+                extension=parsed_path.startswith("/api/extension/"),
+            )
 
     def _upload_zip(self) -> dict[str, Any]:
         state = self.server.state
@@ -305,6 +423,10 @@ class BridgeHandler(BaseHTTPRequestHandler):
 
             threading.Thread(target=perform_restart, daemon=True).start()
             return {"message": "Riavvio in corso..."}
+
+        automation_payload = dispatch_browser_automation_action(state, path, body)
+        if automation_payload is not None:
+            return automation_payload
 
         workspace = state.require_workspace()
         if path == "/api/report":

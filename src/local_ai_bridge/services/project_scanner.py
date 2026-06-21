@@ -1,121 +1,67 @@
 from __future__ import annotations
 
-import fnmatch
 import os
 import re
 import stat
 import time
+from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterator
 
-from local_ai_bridge.core.safety import is_sensitive_relative_path
+from local_ai_bridge.services.project_scanner_git import (
+    GIT_DISCOVERY_TIMEOUT_SECONDS,
+    GitDiscoveryBudgetExceeded,
+    git_manifest,
+    tree_from_manifest,
+)
 from local_ai_bridge.services.project_scanner_helpers import (
     detect_project_version,
     detect_stack,
-    summarize_generic,
-    summarize_js,
-    summarize_python,
+)
+from local_ai_bridge.services.project_scanner_policy import (
+    SPECIAL_FILES,
+    SUPPORTED_EXTENSIONS,
+    ProjectIgnoreRules,
+    directory_exclusion_reason,
+    directory_scan_key,
+    file_exclusion_reason,
+    is_compact_metadata_file,
+    is_context_file,
+    is_generated_report,
+    load_project_ignore,
+    relative_posix,
+)
+from local_ai_bridge.services.project_scanner_summary import (
+    adaptive_summary_limit,
+    format_hot_files,
+    summarize_files,
 )
 
 
-EXCLUDED_DIRS = {
-    ".git", ".hg", ".svn", "node_modules", "__pycache__", ".venv", "venv",
-    "dist", "build", ".pytest_cache", ".mypy_cache", ".ruff_cache", ".idea",
-    ".vscode", "backups", "backup", "coverage", ".next", ".nuxt",
-}
-EXCLUDED_DIRS_CASEFOLD = {name.casefold() for name in EXCLUDED_DIRS}
-SUPPORTED_EXTENSIONS = {
-    ".py", ".js", ".jsx", ".ts", ".tsx", ".json", ".yaml", ".yml", ".toml",
-    ".html", ".css", ".scss", ".go", ".rs", ".java", ".cs", ".md",
-}
-SPECIAL_FILES = {"Dockerfile", "Makefile", "package.json", "pyproject.toml", "requirements.txt"}
-GENERATED_REPORT_PATTERNS = (
-    "ai_super_report.md",
-    "ai_super_report_*.md",
-    "report_diagnostic.md",
-    "report_diagnostic_*.md",
-    "super_report.md",
-    "super_report_*.md",
+__all__ = (
+    "ProjectIgnoreRules",
+    "ScanBudgetExceeded",
+    "ScanResult",
+    "SPECIAL_FILES",
+    "SUPPORTED_EXTENSIONS",
+    "is_generated_report",
+    "iter_project_files",
+    "load_project_ignore",
+    "rank_task_candidates",
+    "scan_project",
 )
+
+
 MAX_FILE_BYTES = 750_000
 MAX_TREE_ENTRIES = 3_000
-MAX_SUMMARY_FILES = 700
+MAX_SUMMARY_FILES = 240
 MAX_CANDIDATE_BYTES = 120_000
 MAX_DISCOVERED_FILES = 12_000
 MAX_DISCOVERED_DIRS = 2_000
 MAX_SCAN_DEPTH = 40
 DEFAULT_SCAN_BUDGET_SECONDS = 45.0
 CANDIDATE_SCAN_BUDGET_SECONDS = 15.0
-PROJECT_IGNORE_FILE = ".bridgai/ignore"
-
-
-@dataclass(frozen=True, slots=True)
-class ProjectIgnoreRules:
-    """Project-local exclusions used only while building scanner/report context."""
-
-    patterns: tuple[str, ...] = ()
-
-    @classmethod
-    def load(cls, root: Path) -> "ProjectIgnoreRules":
-        path = root / PROJECT_IGNORE_FILE
-        try:
-            text = path.read_text(encoding="utf-8", errors="replace")
-        except OSError:
-            return cls()
-
-        patterns: list[str] = []
-        for raw_line in text.splitlines():
-            line = raw_line.strip()
-            if not line or line.startswith("#"):
-                continue
-            normalized = line.replace("\\", "/")
-            while normalized.startswith("./"):
-                normalized = normalized[2:]
-            if normalized:
-                patterns.append(normalized)
-        return cls(tuple(patterns))
-
-    def matches(self, relative: str, *, is_dir: bool = False) -> bool:
-        candidate = relative.replace("\\", "/").strip("/")
-        if not candidate:
-            return False
-
-        parts = candidate.split("/")
-        for raw_pattern in self.patterns:
-            directory_only = raw_pattern.endswith("/")
-            pattern = raw_pattern.rstrip("/")
-            if not pattern:
-                continue
-
-            anchored = raw_pattern.startswith("/")
-            pattern = pattern.lstrip("/")
-            if directory_only:
-                if self._directory_match(candidate, parts, pattern, anchored):
-                    return True
-                continue
-
-            recursive_base = pattern[:-3].rstrip("/") if pattern.endswith("/**") else ""
-            if recursive_base and (candidate == recursive_base or candidate.startswith(recursive_base + "/")):
-                return True
-
-            if "/" in pattern or anchored:
-                if fnmatch.fnmatchcase(candidate, pattern):
-                    return True
-            elif any(fnmatch.fnmatchcase(part, pattern) for part in parts):
-                return True
-        return False
-
-    @staticmethod
-    def _directory_match(candidate: str, parts: list[str], pattern: str, anchored: bool) -> bool:
-        if "/" in pattern or anchored:
-            prefixes = ["/".join(parts[:index]) for index in range(1, len(parts) + 1)]
-            return any(fnmatch.fnmatchcase(prefix, pattern) for prefix in prefixes)
-        return any(fnmatch.fnmatchcase(part, pattern) for part in parts)
-
-
-def load_project_ignore(root: Path) -> ProjectIgnoreRules:
-    return ProjectIgnoreRules.load(root)
 
 
 class ScanBudgetExceeded(RuntimeError):
@@ -132,7 +78,56 @@ class ScanResult:
     diagnostics: list[str] = field(default_factory=list)
     scanned_files: int = 0
     skipped_files: int = 0
+    omitted_files: int = 0
     discovered_files: int = 0
+    excluded_directories: int = 0
+    excluded_files: int = 0
+    exclusion_summary: str = ""
+    discovery_mode: str = "filesystem filtrato"
+    python_files: int = 0
+    python_syntax_errors: int = 0
+    javascript_files: int = 0
+
+
+@dataclass(slots=True)
+class ScanStats:
+    excluded_directories: int = 0
+    excluded_files: int = 0
+    discovered_files: int = 0
+    reasons: Counter[str] = field(default_factory=Counter)
+    excluded_directory_keys: set[str] = field(default_factory=set)
+
+    def exclude_directory(self, reason: str, key: str | None = None) -> None:
+        if key is not None:
+            normalized = key.casefold()
+            if normalized in self.excluded_directory_keys:
+                return
+            self.excluded_directory_keys.add(normalized)
+        self.excluded_directories += 1
+        self.reasons[f"dir: {reason}"] += 1
+
+    def exclude_file(self, reason: str) -> None:
+        self.excluded_files += 1
+        self.reasons[f"file: {reason}"] += 1
+
+    def discover_file(self) -> None:
+        self.discovered_files += 1
+
+    def merge(self, other: "ScanStats") -> None:
+        self.excluded_directories += other.excluded_directories
+        self.excluded_files += other.excluded_files
+        self.discovered_files += other.discovered_files
+        self.reasons.update(other.reasons)
+        self.excluded_directory_keys.update(other.excluded_directory_keys)
+
+    def summary(self, limit: int = 8) -> str:
+        if not self.reasons:
+            return "nessuna esclusione automatica"
+        rows = [f"{reason} ({count})" for reason, count in self.reasons.most_common(limit)]
+        remaining = len(self.reasons) - len(rows)
+        if remaining > 0:
+            rows.append(f"altre categorie ({remaining})")
+        return ", ".join(rows)
 
 
 def _deadline(seconds: float) -> float:
@@ -144,52 +139,39 @@ def _check_deadline(deadline: float) -> None:
         raise ScanBudgetExceeded("limite di tempo della scansione raggiunto")
 
 
-def is_generated_report(relative: str) -> bool:
-    name = Path(relative).name.lower()
-    return any(fnmatch.fnmatch(name, pattern) for pattern in GENERATED_REPORT_PATTERNS)
-
-
-def _relative_posix(root: Path, path: Path) -> str:
-    return path.relative_to(root).as_posix()
-
-
-def _allowed_dir(root: Path, current: Path, name: str, ignore: ProjectIgnoreRules) -> bool:
-    if name.casefold() in EXCLUDED_DIRS_CASEFOLD:
-        return False
-    relative = _relative_posix(root, current / name)
-    return not is_sensitive_relative_path(relative) and not ignore.matches(relative, is_dir=True)
-
-
-def _allowed_file(root: Path, path: Path, ignore: ProjectIgnoreRules) -> bool:
-    relative = _relative_posix(root, path)
-    return (
-        relative != PROJECT_IGNORE_FILE
-        and not is_sensitive_relative_path(relative)
-        and not is_generated_report(relative)
-        and not ignore.matches(relative)
-    )
+def _git_attempt_deadline(deadline: float) -> float:
+    """Reserve time for the filtered-filesystem fallback."""
+    remaining = max(0.1, deadline - time.monotonic())
+    git_budget = min(GIT_DISCOVERY_TIMEOUT_SECONDS + 1.0, max(0.5, remaining * 0.35))
+    return min(deadline, _deadline(git_budget))
 
 
 def _is_reparse_or_link(entry: os.DirEntry[str]) -> bool:
-    """Return True for symlinks and Windows reparse points/junctions.
-
-    The scanner never follows these entries. This prevents cycles and very slow
-    traversals on Windows where a junction can point back to a parent or to a
-    large external tree.
-    """
+    """Return True for symlinks and Windows reparse points/junctions."""
     try:
         if entry.is_symlink():
             return True
-        info = entry.stat(follow_symlinks=False)
     except OSError:
         return True
     reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+    if not reparse_flag:
+        return False
+    try:
+        info = entry.stat(follow_symlinks=False)
+    except OSError:
+        return True
     file_attributes = getattr(info, "st_file_attributes", 0)
-    return bool(reparse_flag and file_attributes & reparse_flag)
+    return bool(file_attributes & reparse_flag)
 
 
 def _safe_entries(
-    root: Path, directory: Path, deadline: float, ignore: ProjectIgnoreRules
+    root: Path,
+    directory: Path,
+    deadline: float,
+    ignore: ProjectIgnoreRules,
+    stats: ScanStats | None = None,
+    *,
+    context_only: bool = False,
 ) -> list[tuple[Path, bool]]:
     _check_deadline(deadline)
     items: list[tuple[Path, bool]] = []
@@ -206,9 +188,22 @@ def _safe_entries(
                 except OSError:
                     continue
                 if is_dir:
-                    if _allowed_dir(root, directory, entry.name, ignore):
-                        items.append((path, True))
-                elif is_file and _allowed_file(root, path, ignore):
+                    reason = directory_exclusion_reason(root, directory, entry.name, ignore)
+                    if reason:
+                        if stats is not None:
+                            stats.exclude_directory(reason)
+                        continue
+                    items.append((path, True))
+                elif is_file:
+                    reason = file_exclusion_reason(root, path, ignore)
+                    if reason:
+                        if stats is not None:
+                            stats.exclude_file(reason)
+                        continue
+                    if stats is not None:
+                        stats.discover_file()
+                    if context_only and not is_context_file(path):
+                        continue
                     items.append((path, False))
     except OSError:
         return []
@@ -216,7 +211,12 @@ def _safe_entries(
 
 
 def _walk_project_files(
-    root: Path, deadline: float, ignore: ProjectIgnoreRules
+    root: Path,
+    deadline: float,
+    ignore: ProjectIgnoreRules,
+    stats: ScanStats | None = None,
+    *,
+    context_only: bool = False,
 ) -> Iterator[tuple[Path, str]]:
     stack: list[tuple[Path, int]] = [(root, 0)]
     directories_seen = 0
@@ -229,7 +229,14 @@ def _walk_project_files(
         directories_seen += 1
         if directories_seen > MAX_DISCOVERED_DIRS:
             raise ScanBudgetExceeded("limite massimo di directory raggiunto")
-        entries = _safe_entries(root, directory, deadline, ignore)
+        entries = _safe_entries(
+            root,
+            directory,
+            deadline,
+            ignore,
+            stats,
+            context_only=context_only,
+        )
         child_dirs: list[Path] = []
         for path, is_dir in entries:
             if is_dir:
@@ -237,8 +244,9 @@ def _walk_project_files(
                 continue
             files_seen += 1
             if files_seen > MAX_DISCOVERED_FILES:
-                raise ScanBudgetExceeded("limite massimo di file raggiunto")
-            yield path, _relative_posix(root, path)
+                raise ScanBudgetExceeded("limite massimo di file rilevanti raggiunto")
+            yield path, relative_posix(root, path)
+        child_dirs.sort(key=directory_scan_key)
         for child in reversed(child_dirs):
             stack.append((child, depth + 1))
 
@@ -246,12 +254,18 @@ def _walk_project_files(
 def iter_project_files(root: Path, time_budget: float = DEFAULT_SCAN_BUDGET_SECONDS):
     """Yield safe project files without following links or junctions."""
     ignore = load_project_ignore(root)
-    yield from _walk_project_files(root, _deadline(time_budget), ignore)
+    deadline = _deadline(time_budget)
+    try:
+        manifest = git_manifest(root, _git_attempt_deadline(deadline), ignore)
+    except GitDiscoveryBudgetExceeded:
+        manifest = None
+    if manifest is not None:
+        yield from manifest
+        return
+    yield from _walk_project_files(root, deadline, ignore)
 
 
-def _tree(
-    root: Path, deadline: float, ignore: ProjectIgnoreRules
-) -> tuple[str, bool]:
+def _tree(root: Path, deadline: float, ignore: ProjectIgnoreRules) -> tuple[str, bool]:
     rows = [f"{root.name}/"]
     count = 0
     truncated = False
@@ -288,6 +302,20 @@ def _tree(
     return "\n".join(rows), truncated
 
 
+def _candidate_files(
+    root: Path,
+    deadline: float,
+    ignore: ProjectIgnoreRules,
+) -> Iterator[tuple[Path, str]]:
+    try:
+        manifest = git_manifest(root, _git_attempt_deadline(deadline), ignore)
+    except GitDiscoveryBudgetExceeded:
+        manifest = None
+    if manifest is not None:
+        return (item for item in manifest if is_context_file(item[0]))
+    return _walk_project_files(root, deadline, ignore, context_only=True)
+
+
 def rank_task_candidates(root: Path, task: str, limit: int = 12) -> list[str]:
     tokens = {token for token in re.findall(r"[a-zA-Z0-9_]{3,}", task.lower())}
     if not tokens:
@@ -295,13 +323,11 @@ def rank_task_candidates(root: Path, task: str, limit: int = 12) -> list[str]:
     scored: list[tuple[int, str]] = []
     ignore = load_project_ignore(root)
     try:
-        files = _walk_project_files(root, _deadline(CANDIDATE_SCAN_BUDGET_SECONDS), ignore)
+        files = _candidate_files(root, _deadline(CANDIDATE_SCAN_BUDGET_SECONDS), ignore)
         for path, relative in files:
-            if path.suffix.lower() not in SUPPORTED_EXTENSIONS and path.name not in SPECIAL_FILES:
-                continue
             score = sum(4 for token in tokens if token in relative.lower())
             try:
-                if path.stat().st_size <= MAX_CANDIDATE_BYTES:
+                if not is_compact_metadata_file(path) and path.stat().st_size <= MAX_CANDIDATE_BYTES:
                     sample = path.read_text(encoding="utf-8", errors="replace").lower()
                     score += sum(min(sample.count(token), 5) for token in tokens)
             except OSError:
@@ -314,81 +340,132 @@ def rank_task_candidates(root: Path, task: str, limit: int = 12) -> list[str]:
     return [relative for _, relative in scored[:limit]]
 
 
-def scan_project(root: Path, time_budget: float = DEFAULT_SCAN_BUDGET_SECONDS) -> ScanResult:
-    summaries: list[str] = []
-    sizes: list[tuple[int, str]] = []
-    diagnostics: list[str] = []
-    scanned = skipped = 0
-    deadline = _deadline(time_budget)
-    ignore = load_project_ignore(root)
+def _discover_context_files(
+    root: Path,
+    deadline: float,
+    ignore: ProjectIgnoreRules,
+    stats: ScanStats,
+    diagnostics: list[str],
+) -> tuple[list[tuple[Path, str]], list[tuple[Path, str]] | None, str]:
+    files: list[tuple[Path, str]] = []
+    manifest: list[tuple[Path, str]] | None = None
+    discovery_mode = "filesystem filtrato"
+    git_stats = ScanStats()
+    git_workspace = (root / ".git").exists()
 
     try:
-        files = list(_walk_project_files(root, deadline, ignore))
+        manifest = git_manifest(
+            root,
+            _git_attempt_deadline(deadline),
+            ignore,
+            git_stats,
+        )
+    except GitDiscoveryBudgetExceeded:
+        manifest = None
+        diagnostics.append(
+            "Manifest Git non completato entro il budget riservato; "
+            "attivato il fallback sul filesystem filtrato."
+        )
+
+    if manifest is not None:
+        stats.merge(git_stats)
+        discovery_mode = "manifest Git + filtri BridgAI"
+        context_files = [item for item in manifest if is_context_file(item[0])]
+        if len(context_files) > MAX_DISCOVERED_FILES:
+            diagnostics.append(
+                "Elenco dei file rilevanti troncato al limite massimo configurato."
+            )
+            context_files = context_files[:MAX_DISCOVERED_FILES]
+        files.extend(context_files)
+        return files, manifest, discovery_mode
+
+    if git_workspace:
+        discovery_mode = "filesystem filtrato (fallback Git)"
+        if not any("fallback sul filesystem" in item for item in diagnostics):
+            diagnostics.append(
+                "Manifest Git non disponibile; utilizzato il fallback sul filesystem filtrato."
+            )
+
+    try:
+        files.extend(
+            _walk_project_files(
+                root,
+                deadline,
+                ignore,
+                stats,
+                context_only=True,
+            )
+        )
     except ScanBudgetExceeded as exc:
-        files = []
-        diagnostics.append(f"Scansione filesystem interrotta in sicurezza: {exc}.")
+        diagnostics.append(
+            f"Scansione filesystem interrotta in sicurezza: {exc}. "
+            f"Conservati {len(files)} file già individuati e ritenuti rilevanti."
+        )
+    return files, None, discovery_mode
 
-    for path, relative in files:
-        try:
-            _check_deadline(deadline)
-        except ScanBudgetExceeded:
-            diagnostics.append("Analisi dei file troncata per limite di tempo.")
-            skipped += max(0, len(files) - scanned)
-            break
-        try:
-            size = path.stat().st_size
-            loc = sum(1 for _ in path.open("r", encoding="utf-8", errors="replace"))
-        except OSError:
-            skipped += 1
-            continue
 
-        supported = path.suffix.lower() in SUPPORTED_EXTENSIONS or path.name in SPECIAL_FILES
-        if supported:
-            sizes.append((loc, relative))
-        if not supported:
-            continue
-        if scanned >= MAX_SUMMARY_FILES:
-            skipped += 1
-            continue
-        if size > MAX_FILE_BYTES:
-            summaries.append(f"### `{relative}`\n[File oltre il limite di scansione: {size} byte]\n")
-            skipped += 1
-            continue
-        try:
-            content = path.read_text(encoding="utf-8", errors="replace")
-        except OSError as exc:
-            summaries.append(f"### `{relative}`\n[Errore lettura: {exc}]\n")
-            skipped += 1
-            continue
+def scan_project(
+    root: Path,
+    time_budget: float = DEFAULT_SCAN_BUDGET_SECONDS,
+    task: str = "",
+) -> ScanResult:
+    diagnostics: list[str] = []
+    deadline = _deadline(time_budget)
+    discovery_budget = min(25.0, max(5.0, time_budget * 0.6))
+    discovery_deadline = min(deadline, _deadline(discovery_budget))
+    ignore = load_project_ignore(root)
+    stats = ScanStats()
 
-        if path.suffix.lower() == ".py":
-            summary, found = summarize_python(content, relative)
-            diagnostics.extend(found)
-        elif path.suffix.lower() in {".js", ".jsx", ".ts", ".tsx"}:
-            summary = summarize_js(content)
-        else:
-            summary = summarize_generic(path, content)
-        summaries.append(f"### `{relative}`\n```text\n{summary}\n```\n")
-        scanned += 1
+    files, manifest, discovery_mode = _discover_context_files(
+        root,
+        discovery_deadline,
+        ignore,
+        stats,
+        diagnostics,
+    )
+    summary_limit = adaptive_summary_limit(len(files), task, MAX_SUMMARY_FILES)
+    summary = summarize_files(
+        files,
+        deadline=deadline,
+        max_file_bytes=MAX_FILE_BYTES,
+        max_summary_files=summary_limit,
+        task=task,
+    )
+    if summary.omitted_files:
+        diagnostics.append(
+            f"Limite adattivo del contesto: {summary_limit} file espansi su "
+            f"{summary_limit + summary.omitted_files} file rilevanti indicizzati."
+        )
+    diagnostics.extend(summary.diagnostics)
 
-    sizes.sort(reverse=True)
-    hot_rows = []
-    for loc, relative in sizes[:20]:
-        icon = "🔥" if loc >= 350 else "⚠️" if loc >= 300 else "🛠️"
-        hot_rows.append(f"- {icon} `{relative}` ({loc} LOC)")
-
-    tree, tree_truncated = _tree(root, _deadline(min(15.0, time_budget)), ignore)
+    if manifest is not None:
+        tree, tree_truncated = tree_from_manifest(
+            root,
+            manifest,
+            max_entries=MAX_TREE_ENTRIES,
+            max_depth=MAX_SCAN_DEPTH,
+        )
+    else:
+        tree, tree_truncated = _tree(root, _deadline(min(15.0, time_budget)), ignore)
     if tree_truncated:
         diagnostics.append("Albero del progetto troncato in sicurezza per limite di tempo o dimensione.")
 
     return ScanResult(
         tree=tree,
-        summaries="\n".join(summaries) or "Nessun file supportato rilevato.",
-        hot_files="\n".join(hot_rows) or "- Nessun file testuale rilevato.",
+        summaries="\n".join(summary.summaries) or "Nessun file supportato rilevato.",
+        hot_files=format_hot_files(summary.code_sizes),
         stack=detect_stack(root),
         project_version=detect_project_version(root),
         diagnostics=diagnostics,
-        scanned_files=scanned,
-        skipped_files=skipped,
-        discovered_files=len(files),
+        scanned_files=summary.scanned_files,
+        skipped_files=summary.skipped_files,
+        omitted_files=summary.omitted_files,
+        discovered_files=stats.discovered_files,
+        excluded_directories=stats.excluded_directories,
+        excluded_files=stats.excluded_files,
+        exclusion_summary=stats.summary(),
+        discovery_mode=discovery_mode,
+        python_files=summary.python_files,
+        python_syntax_errors=summary.python_syntax_errors,
+        javascript_files=summary.javascript_files,
     )

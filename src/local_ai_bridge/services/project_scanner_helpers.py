@@ -4,6 +4,8 @@ import ast
 import json
 import re
 import tomllib
+import xml.etree.ElementTree as ET
+from html import unescape
 from pathlib import Path
 
 
@@ -82,20 +84,174 @@ def summarize_python(content: str, relative: str) -> tuple[str, list[str]]:
     return "\n".join(rows) or "(Nessuna definizione di primo livello)", []
 
 
+def _short(value: str, limit: int = 220) -> str:
+    compact = " ".join(value.split())
+    return compact if len(compact) <= limit else compact[: limit - 3].rstrip() + "..."
+
+
+def _unique(values: list[str], limit: int) -> list[str]:
+    return list(dict.fromkeys(value for value in values if value))[:limit]
+
+
 def summarize_js(content: str) -> str:
-    patterns = (
-        r"(?:export\s+)?(?:async\s+)?function\s+([A-Za-z_$][\w$]*)\s*\(([^)]*)\)",
-        r"(?:export\s+)?class\s+([A-Za-z_$][\w$]*)",
-        r"(?:export\s+)?(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:async\s*)?\([^)]*\)\s*=>",
-    )
+    """Extract a bounded structural outline from JavaScript/TypeScript text."""
     rows: list[str] = []
-    for pattern in patterns:
-        rows.extend(match.group(0).strip()[:240] + " ..." for match in re.finditer(pattern, content))
-    return "\n".join(dict.fromkeys(rows)) or "(Nessuna firma rilevata)"
+    import_sources = _unique(
+        [
+            match.group(1) or match.group(2)
+            for match in re.finditer(
+                r'''(?mx)
+                ^[ \t]*import[ \t]+(?:type[ \t]+)?(?:[^;\n"']+?[ \t]+from[ \t]+)?["']([^"']+)["']
+                |^[ \t]*export[ \t]+\*[ \t]+from[ \t]+["']([^"']+)["']
+                ''',
+                content,
+            )
+        ],
+        12,
+    )
+    if import_sources:
+        rows.append("Import/moduli principali: " + ", ".join(import_sources))
+
+    signatures: list[str] = []
+    signature_patterns = (
+        r"(?:export\s+)?(?:default\s+)?(?:async\s+)?function\s+[A-Za-z_$][\w$]*\s*\([^)]*\)",
+        r"(?:export\s+)?(?:default\s+)?class\s+[A-Za-z_$][\w$]*(?:\s+extends\s+[^\n{]+)?",
+        r"(?:export\s+)?(?:const|let|var)\s+[A-Za-z_$][\w$]*\s*=\s*(?:async\s*)?\([^)]*\)\s*=>",
+        r"(?:export\s+)?(?:const|let|var)\s+[A-Za-z_$][\w$]*\s*=\s*(?:async\s*)?[A-Za-z_$][\w$]*\s*=>",
+        r"(?:export\s+)?(?:interface|type|enum)\s+[A-Za-z_$][\w$]*",
+    )
+    for pattern in signature_patterns:
+        signatures.extend(_short(match.group(0)) + " ..." for match in re.finditer(pattern, content))
+    rows.extend(_unique(signatures, 24))
+
+    export_names = _unique(
+        re.findall(
+            r"(?m)^\s*export\s+(?:default\s+)?(?:const|let|var|function|class|interface|type|enum)\s+([A-Za-z_$][\w$]*)",
+            content,
+        ),
+        20,
+    )
+    reexport_blocks = re.findall(r"(?m)^\s*export\s*\{([^}]+)\}", content)
+    for block in reexport_blocks:
+        for value in block.split(","):
+            export_names.append(value.strip().split(" as ")[-1].strip())
+    export_names = _unique(export_names, 20)
+    if export_names:
+        rows.append("Export rilevati: " + ", ".join(export_names))
+
+    if len(rows) <= (1 if import_sources else 0):
+        declarations = _unique(
+            re.findall(
+                r"(?m)^\s*(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=",
+                content,
+            ),
+            15,
+        )
+        if declarations:
+            rows.append("Dichiarazioni principali: " + ", ".join(declarations))
+
+    if not rows:
+        line_count = content.count("\n") + (1 if content else 0)
+        return f"Modulo JavaScript/TypeScript ({line_count} righe); nessuna API di primo livello rilevata."
+    return "\n".join(rows)
+
+
+def _without_boilerplate_comments(content: str) -> str:
+    value = re.sub(r"/\*.*?\*/", "", content, flags=re.DOTALL)
+    value = re.sub(r"<!--.*?-->", "", value, flags=re.DOTALL)
+    return value
+
+
+def _markdown_summary(content: str) -> str:
+    lines = content.splitlines()
+    headings = _unique(
+        [re.sub(r"^#{1,6}\s*", "", line).strip() for line in lines if re.match(r"^\s*#{1,6}\s+", line)],
+        12,
+    )
+    prose = _unique(
+        [
+            _short(line.strip())
+            for line in lines
+            if line.strip()
+            and not line.lstrip().startswith(("#", "```", "<!--", "!["))
+        ],
+        6,
+    )
+    rows = [f"Documento Markdown: {len(lines)} righe."]
+    if headings:
+        rows.append("Sezioni: " + " | ".join(headings))
+    if prose:
+        rows.append("Contenuti iniziali: " + " / ".join(prose))
+    return "\n".join(rows)
+
+
+def _html_summary(content: str) -> str:
+    cleaned = _without_boilerplate_comments(content)
+    title_match = re.search(r"<title[^>]*>(.*?)</title>", cleaned, flags=re.I | re.S)
+    description_match = re.search(
+        r"<meta[^>]+name=[\"']description[\"'][^>]+content=[\"']([^\"']+)",
+        cleaned,
+        flags=re.I,
+    )
+    headings = _unique(
+        [unescape(re.sub(r"<[^>]+>", "", match)).strip() for match in re.findall(r"<h[1-3][^>]*>(.*?)</h[1-3]>", cleaned, flags=re.I | re.S)],
+        8,
+    )
+    rows = ["Documento HTML."]
+    if title_match:
+        rows.append("Titolo: " + _short(unescape(title_match.group(1))))
+    if description_match:
+        rows.append("Descrizione: " + _short(unescape(description_match.group(1))))
+    if headings:
+        rows.append("Intestazioni: " + " | ".join(headings))
+    scripts = len(re.findall(r"<script\b", cleaned, flags=re.I))
+    styles = len(re.findall(r"<(?:link[^>]+stylesheet|style)\b", cleaned, flags=re.I))
+    rows.append(f"Struttura: {scripts} script, {styles} riferimenti/blocchi stile.")
+    return "\n".join(rows)
+
+
+def _xml_summary(content: str) -> str:
+    cleaned = _without_boilerplate_comments(content).strip()
+    try:
+        root = ET.fromstring(cleaned)
+    except ET.ParseError as exc:
+        return f"XML non valido: {exc}"
+
+    def local_name(tag: str) -> str:
+        return tag.rsplit("}", 1)[-1]
+
+    tags = _unique([local_name(node.tag) for node in root.iter()], 20)
+    rows = [f"XML root: {local_name(root.tag)}", "Elementi principali: " + ", ".join(tags)]
+    permissions: list[str] = []
+    for node in root.iter():
+        if local_name(node.tag) != "uses-permission":
+            continue
+        for key, value in node.attrib.items():
+            if key.rsplit("}", 1)[-1] == "name":
+                permissions.append(value)
+    if permissions:
+        rows.append("Permessi dichiarati: " + ", ".join(_unique(permissions, 12)))
+    return "\n".join(rows)
+
+
+def _css_summary(content: str) -> str:
+    cleaned = _without_boilerplate_comments(content)
+    variables = _unique(re.findall(r"(--[A-Za-z0-9_-]+)\s*:", cleaned), 20)
+    selectors = _unique(
+        [_short(value) for value in re.findall(r"(?m)^\s*([^@\n][^\n{]+)\s*\{", cleaned)],
+        12,
+    )
+    rows = [f"Foglio di stile: {content.count(chr(10)) + (1 if content else 0)} righe."]
+    if variables:
+        rows.append("Variabili CSS: " + ", ".join(variables))
+    if selectors:
+        rows.append("Selettori principali: " + " | ".join(selectors))
+    return "\n".join(rows)
 
 
 def summarize_generic(path: Path, content: str) -> str:
-    if path.suffix == ".json":
+    suffix = path.suffix.casefold()
+    if suffix == ".json":
         try:
             value = json.loads(content)
             if isinstance(value, dict):
@@ -103,9 +259,28 @@ def summarize_generic(path: Path, content: str) -> str:
             return f"JSON {type(value).__name__}"
         except Exception as exc:
             return f"JSON non valido: {exc}"
-    lines = [line.strip() for line in content.splitlines() if line.strip() and not line.lstrip().startswith("#")]
-    return "\n".join(lines[:25]) or "(File vuoto o senza elementi riassumibili)"
+    if suffix in {".md", ".mdx", ".rst"}:
+        return _markdown_summary(content)
+    if suffix in {".html", ".htm"}:
+        return _html_summary(content)
+    if suffix in {".xml", ".xaml", ".plist"}:
+        return _xml_summary(content)
+    if suffix in {".css", ".scss", ".sass", ".less"}:
+        return _css_summary(content)
 
+    cleaned = _without_boilerplate_comments(content)
+    lines = [
+        _short(line.strip())
+        for line in cleaned.splitlines()
+        if line.strip()
+        and not line.lstrip().startswith(("#", "//", ";"))
+        and "copyright" not in line.casefold()
+        and "licensed under" not in line.casefold()
+    ]
+    selected = _unique(lines, 18)
+    if not selected:
+        return "(File vuoto o senza elementi riassumibili)"
+    return "\n".join(selected)
 
 def _read_pyproject(root: Path) -> dict:
     path = root / "pyproject.toml"

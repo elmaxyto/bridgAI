@@ -29,14 +29,13 @@ def web_url(port: int) -> str:
 
 
 def is_web_server_ready(port: int, timeout: float = 0.35) -> bool:
-    handler = urllib.request.ProxyHandler({})
-    opener = urllib.request.build_opener(handler)
     request = urllib.request.Request(web_url(port), headers={"Accept": "text/html"})
     try:
-        with opener.open(request, timeout=timeout) as response:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
             return response.status == 200
     except (OSError, urllib.error.URLError, ValueError):
         return False
+
 
 
 def browser_extension_service_status(
@@ -46,14 +45,12 @@ def browser_extension_service_status(
 ) -> dict[str, object]:
     if not token.strip():
         raise ValueError("Token dell’estensione mancante.")
-    handler = urllib.request.ProxyHandler({})
-    opener = urllib.request.build_opener(handler)
     request = urllib.request.Request(
         web_url(port) + "api/extension/status",
         headers={"X-BridgAI-Extension-Token": token.strip()},
     )
     try:
-        with opener.open(request, timeout=timeout) as response:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
             payload = json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
         try:
