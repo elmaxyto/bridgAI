@@ -1,3 +1,48 @@
+# >>> BridgAI managed GitHub ignores >>>
+# Rules maintained automatically before GitHub publishing.
+# Keep custom project rules outside this block.
+# Detected stacks: python
+
+# Dependencies and virtual environments
+node_modules/
+__pycache__/
+.venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.tox/
+.nox/
+
+# Local secrets and logs
+.env
+.env.*
+!.env.example
+!.env.sample
+!.env.template
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Operating-system metadata
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Python bytecode, environments, and build output
+*.py[cod]
+*$py.class
+venv/
+.coverage
+.coverage.*
+htmlcov/
+build/
+dist/
+*.egg-info/
+
+# <<< BridgAI managed GitHub ignores <<<
+
 # Python bytecode and caches
 __pycache__/
 *.py[cod]

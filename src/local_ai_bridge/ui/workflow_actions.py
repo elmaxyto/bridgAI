@@ -1,52 +1,35 @@
 from __future__ import annotations
-from local_ai_bridge.i18n import tr as _
+
 import re
 from pathlib import Path
 from PySide6.QtCore import QUrl
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import QApplication, QFileDialog, QMessageBox
-from local_ai_bridge.services.exporting import parse_download_requests
-from local_ai_bridge.services.markdown_exchange import (
-    export_files_to_markdown,
-    parse_markdown_response,
-)
+
 from local_ai_bridge.core.prompt_presets import compose_task_with_preset
+from local_ai_bridge.i18n import tr as _
+from local_ai_bridge.services.exporting import parse_download_requests
+from local_ai_bridge.services.markdown_exchange import export_files_to_markdown
 from local_ai_bridge.services.patching import (
     inspect_full_file,
     inspect_gemini_response,
     inspect_patch,
-    parse_gemini_patch_response,
 )
-from local_ai_bridge.services.temp_storage import latest_markdown_file, managed_subdir
 from local_ai_bridge.services.speech_to_text import merge_task_text
+from local_ai_bridge.services.temp_storage import managed_subdir
+from local_ai_bridge.services.text_file_operations import inspect_text_file_operations
+from local_ai_bridge.ui.markdown_update_actions import MarkdownUpdateActionsMixin
 from local_ai_bridge.ui.speech_dialog import SpeechDialog
-PATCH_MARKER = re.compile('<{7}\\s*SEARCH', re.IGNORECASE)
+
+LEGACY_PATCH_MARKER = re.compile(r'<{7}\s*SEARCH', re.IGNORECASE)
 GEMINI_URL = 'https://gemini.google.com/'
-GEMINI_REPORT_PROTOCOL = """
-## Protocollo obbligatorio per Gemini
-
-- Se ti servono file reali, rispondi prima con una sola riga `#scarica percorso/file1, percorso/file2`.
-- Dopo che l’utente avrà allegato lo ZIP da Google Drive, non restituire uno ZIP di aggiornamento.
-- Per ogni file da modificare scrivi una riga `FILE: percorso/relativo.ext`, seguita da uno o più blocchi:
-
-```text
-<<<<<<< SEARCH
-testo esatto esistente
-=======
-testo sostitutivo
->>>>>>> REPLACE
-```
-
-- Ripeti `FILE: ...` prima dei blocchi del file successivo.
-- Non omettere i percorsi e non usare patch abbreviate: BridgAI analizzerà localmente il testo e mostrerà il diff prima di applicarlo.
-""".strip()
 
 
 def gemini_drive_warning_required(enabled: bool) -> bool:
     return not enabled
 
 
-class WorkflowActionsMixin:
+class WorkflowActionsMixin(MarkdownUpdateActionsMixin):
 
     def _gemini_drive_directory(self) -> Path | None:
         if not self.settings.gemini_drive_enabled:
@@ -89,13 +72,13 @@ class WorkflowActionsMixin:
         if not result.ok:
             return
 
-        if self.settings.simple_mode and self.settings.gemini_drive_enabled:
-            report = self.report_edit.toPlainText().rstrip()
-            if GEMINI_REPORT_PROTOCOL not in report:
-                self.report_edit.setPlainText(f'{report}\n\n{GEMINI_REPORT_PROTOCOL}\n')
-
-        extension_queued = self.queue_report_with_browser_extension(
-            self.report_edit.toPlainText()
+        extension_queued = (
+            False
+            if (
+                self.settings.markdown_exchange_mode
+                or self.settings.textual_file_operations_mode
+            )
+            else self.queue_report_with_browser_extension(self.report_edit.toPlainText())
         )
 
         if self.settings.simple_mode:
@@ -104,8 +87,14 @@ class WorkflowActionsMixin:
                     'La richiesta è stata affidata all’estensione Chrome. '
                     'I pulsanti e il flusso manuale restano comunque disponibili.'
                 )
-            elif self.settings.gemini_drive_enabled:
-                message = _('Istruzioni copiate. Ora premi “Continua su Gemini” e incollale nella chat.')
+            elif self.settings.textual_file_operations_mode:
+                message = _(
+                    'Istruzioni copiate. L’AI dovrà restituire un file Markdown di aggiornamento da caricare nel passaggio 3.'
+                )
+            elif self.settings.markdown_exchange_mode:
+                message = _(
+                    'Istruzioni copiate. Le richieste #scarica verranno esportate come Markdown.'
+                )
             else:
                 message = _('Istruzioni per AI copiate. Incollale nella tua AI preferita.')
             QMessageBox.information(
@@ -118,10 +107,9 @@ class WorkflowActionsMixin:
 
     def _report_finished(self) -> None:
         self.report_button.setEnabled(True)
-        if self.settings.simple_mode and self.settings.gemini_drive_enabled:
-            self.report_button.setText(_('Prepara per Gemini'))
-        else:
-            self.report_button.setText(_('Prepara per l’AI') if self.settings.simple_mode else _('Genera Super-Report'))
+        self.report_button.setText(
+            _('Prepara per l’AI') if self.settings.simple_mode else _('Genera Super-Report')
+        )
 
     def copy_report(self) -> None:
         text = self.report_edit.toPlainText()
@@ -129,7 +117,7 @@ class WorkflowActionsMixin:
             QMessageBox.information(self, _('Report'), _('Genera prima il Super-Report.'))
             return
         QApplication.clipboard().setText(text)
-        self._show_status(_('Report copiato negli appunti.'))
+        self._show_status(_('Report copied negli appunti.'))
 
     def save_report(self) -> None:
         text = self.report_edit.toPlainText()
@@ -137,7 +125,7 @@ class WorkflowActionsMixin:
         if not workspace or not text:
             QMessageBox.information(self, _('Report'), _('Genera prima il Super-Report.'))
             return
-        if self.settings.gemini_drive_enabled:
+        if self.settings.gemini_drive_enabled and not self.settings.markdown_exchange_mode:
             drive_directory = self._gemini_drive_directory()
             if drive_directory is None:
                 return
@@ -163,15 +151,18 @@ class WorkflowActionsMixin:
         self._show_status(_('Istruzioni copiate: incollale nella chat appena aperta.'))
 
     def open_gemini(self) -> None:
-        if gemini_drive_warning_required(self.settings.gemini_drive_enabled):
-            QMessageBox.information(
-                self,
-                _('Google Drive richiesto per Gemini'),
-                _('Per utilizzare Gemini in modo appropriato, abilita Google Drive nelle Impostazioni.'),
-            )
-            return
-        if self._gemini_drive_directory() is None:
-            return
+        if not self.settings.markdown_exchange_mode:
+            if gemini_drive_warning_required(self.settings.gemini_drive_enabled):
+                QMessageBox.information(
+                    self,
+                    _('Google Drive richiesto per gli ZIP di Gemini'),
+                    _(
+                        'Per inviare ZIP a Gemini abilita Google Drive nelle Impostazioni, oppure scegli Markdown come formato dei file richiesti.'
+                    ),
+                )
+                return
+            if self._gemini_drive_directory() is None:
+                return
         copied_instructions = False
         if self.settings.simple_mode:
             text = self.report_edit.toPlainText()
@@ -200,142 +191,71 @@ class WorkflowActionsMixin:
         self.response_edit.setFocus()
         self._show_status(_('Risposta incollata dagli appunti.'))
 
-    def _markdown_download_directory(self) -> Path:
-        configured = self.settings.update_zip_directory.strip()
-        if configured:
-            return Path(configured).expanduser()
-        downloads = Path.home() / 'Downloads'
-        return downloads if downloads.is_dir() else Path.home()
-
-    def choose_markdown_download_directory(self) -> None:
-        initial = self._markdown_download_directory()
-        selected = QFileDialog.getExistingDirectory(
-            self,
-            _('Scegli la cartella dei Markdown scaricati'),
-            str(initial),
-        )
-        if not selected:
-            return
-        self.settings.update_zip_directory = selected
-        self.settings_store.save(self.settings)
-        self._show_status(
-            _('Cartella Markdown scaricati: {path}').format(path=selected)
-        )
-
-    def paste_markdown_result_from_clipboard(self) -> None:
-        text = QApplication.clipboard().text()
-        self.markdown_result_edit.setPlainText(text)
-        self.markdown_result_edit.setFocus()
-        self._show_status(_('Risposta Markdown incollata dagli appunti.'))
-
-    def _inspect_markdown_response_text(self, text: str) -> bool:
-        workspace = self._require_workspace()
-        if not workspace:
-            return False
-        if not text.strip():
-            QMessageBox.warning(
-                self,
-                _('Risposta Markdown richiesta'),
-                _('Incolla o seleziona prima il documento Markdown restituito dall’AI.'),
-            )
-            return False
-        try:
-            plan = parse_markdown_response(workspace, text)
-            snapshot = managed_subdir(self.settings.temp_directory, 'patches') / 'latest_markdown_response.md'
-            snapshot.write_text(text, encoding='utf-8')
-            self.display_plan(plan)
-        except Exception as exc:
-            QMessageBox.critical(self, _('Risposta Markdown non valida'), str(exc))
-            return False
-        self._show_status(
-            _('Risposta Markdown analizzata: {files} file.').format(files=len(plan.changes))
-        )
-        return True
-
-    def prepare_pasted_markdown_response(self) -> None:
-        self._inspect_markdown_response_text(self.markdown_result_edit.toPlainText())
-
-    def _load_markdown_response(self, path: Path) -> None:
-        try:
-            source = path.expanduser().resolve(strict=True)
-            if not source.is_file() or source.suffix.casefold() not in {'.md', '.markdown'}:
-                raise ValueError(_('Il file selezionato non è un documento Markdown valido.'))
-            text = source.read_text(encoding='utf-8-sig')
-        except Exception as exc:
-            QMessageBox.critical(self, _('Lettura Markdown fallita'), str(exc))
-            return
-        self.markdown_result_edit.setPlainText(text)
-        if self._inspect_markdown_response_text(text):
-            self._show_status(
-                _('Markdown caricato da {path}. Controlla l’anteprima prima di applicare.').format(path=source)
-            )
-
-    def choose_markdown_response(self) -> None:
-        selected, _selected_filter = QFileDialog.getOpenFileName(
-            self,
-            _('Scegli la risposta Markdown'),
-            str(self._markdown_download_directory()),
-            _('Markdown (*.md);;Tutti i file (*)'),
-        )
-        if selected:
-            self._load_markdown_response(Path(selected))
-
-    def apply_latest_markdown(self) -> None:
-        directory = self._markdown_download_directory()
-        latest = latest_markdown_file(directory)
-        if latest is None:
-            QMessageBox.warning(
-                self,
-                _('Nessun Markdown trovato'),
-                _('Nessun file Markdown è stato trovato nella cartella:\n{path}').format(path=directory),
-            )
-            return
-        self._load_markdown_response(latest)
-
-    def paste_gemini_result_from_clipboard(self) -> None:
-        text = QApplication.clipboard().text()
-        self.gemini_result_edit.setPlainText(text)
-        self.gemini_result_edit.setFocus()
-        self._show_status(_('Risposta Gemini incollata dagli appunti.'))
-
-    def prepare_gemini_plan(self) -> None:
-        workspace = self._require_workspace()
-        if not workspace:
-            return
-        text = self.gemini_result_edit.toPlainText()
-        if not text.strip():
-            QMessageBox.warning(self, _('Risposta Gemini richiesta'), _('Incolla prima la risposta completa di Gemini.'))
-            return
-        try:
-            snapshot = managed_subdir(self.settings.temp_directory, 'patches') / 'latest_gemini_response.txt'
-            snapshot.write_text(text, encoding='utf-8')
-            plan = inspect_gemini_response(workspace, text)
-            self.display_plan(plan)
-            summary = plan.metadata.get('import_summary', {})
-            self._show_status(
-                _('Risposta Gemini analizzata: {files} file, {blocks} blocchi, nessun blocco ignorato.').format(
-                    files=summary.get('files', len(plan.changes)),
-                    blocks=summary.get('blocks', plan.metadata.get('blocks', 0)),
-                )
-            )
-        except Exception as exc:
-            QMessageBox.critical(self, _('Risposta Gemini non valida'), str(exc))
-
     def analyze_response(self) -> None:
         text = self.response_edit.toPlainText()
-        if self.settings.markdown_exchange_mode and 'BRIDGAI:FILE' in text.upper():
+        requested = parse_download_requests(text)
+        if requested:
+            QMessageBox.information(
+                self,
+                _('Analisi risposta'),
+                'File richiesti:\n- ' + '\n- '.join(requested),
+            )
+            return
+
+        if self.settings.textual_file_operations_mode:
+            workspace = self._require_workspace()
+            if not workspace:
+                return
+            try:
+                snapshot = (
+                    managed_subdir(self.settings.temp_directory, 'patches')
+                    / 'latest_text_file_operations.txt'
+                )
+                snapshot.write_text(text, encoding='utf-8')
+                plan = inspect_text_file_operations(workspace, text)
+                self.display_plan(plan)
+                summary = plan.metadata.get('import_summary', {})
+                self._show_status(
+                    _(
+                        'Operazioni file analizzate: {files} file, {create} creati, {replace} sostituiti, {delete} eliminati.'
+                    ).format(
+                        files=summary.get('files', len(plan.changes)),
+                        create=summary.get('create', 0),
+                        replace=summary.get('replace', 0),
+                        delete=summary.get('delete', 0),
+                    )
+                )
+            except Exception as exc:
+                QMessageBox.critical(self, _('Risposta strutturata non valida'), str(exc))
+            return
+
+        if 'BRIDGAI:FILE' in text.upper():
             self._inspect_markdown_response_text(text)
             return
 
-        requested = parse_download_requests(text)
-        rows: list[str] = []
-        if requested:
-            rows.append('File richiesti:\n- ' + '\n- '.join(requested))
-        if PATCH_MARKER.search(text):
-            rows.append(_('Rilevata almeno una patch SEARCH/REPLACE.'))
-        if not rows:
-            rows.append(_('Nessun #scarica o blocco SEARCH/REPLACE rilevato. Puoi trattare il testo come file completo.'))
-        QMessageBox.information(self, _('Analisi risposta'), '\n\n'.join(rows))
+        if LEGACY_PATCH_MARKER.search(text):
+            workspace = self._require_workspace()
+            if not workspace:
+                return
+            try:
+                target = self.target_edit.text().strip()
+                plan = (
+                    inspect_patch(workspace, target, text)
+                    if target
+                    else inspect_gemini_response(workspace, text)
+                )
+                self.display_plan(plan)
+            except Exception as exc:
+                QMessageBox.critical(self, _('Patch non valida'), str(exc))
+            return
+
+        QMessageBox.information(
+            self,
+            _('Analisi risposta'),
+            _(
+                'Nessuna richiesta #scarica o operazione su file completi rilevata. Verifica il formato selezionato nelle Impostazioni.'
+            ),
+        )
 
     def _export_requested_files_as_markdown(self, workspace: Path, requested: list[str]) -> None:
         try:
@@ -367,7 +287,7 @@ class WorkflowActionsMixin:
                 _('Markdown pronto'),
                 _('Il documento Markdown è stato salvato e copiato negli appunti:\n{path}').format(path=destination),
             )
-        self._show_status(_('Markdown Exchange esportato: {path}').format(path=destination))
+        self._show_status(_('File richiesti esportati come Markdown: {path}').format(path=destination))
 
     def export_requested_files(self) -> None:
         workspace = self._require_workspace()

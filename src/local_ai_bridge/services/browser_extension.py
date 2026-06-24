@@ -16,6 +16,8 @@ STATE_VERSION = 1
 LOCK_TIMEOUT_SECONDS = 2.0
 STALE_LOCK_SECONDS = 30.0
 CONNECTED_WINDOW_SECONDS = 75.0
+REQUEST_DEVELOPMENT = "development"
+REQUEST_OPERATIONAL = "operational"
 
 
 def browser_extension_directory() -> Path:
@@ -123,28 +125,85 @@ def ensure_extension_token(current: str = "") -> str:
 
 
 def queue_request(workspace: Path, prompt: str, provider: str = "chatgpt") -> dict[str, Any]:
+    """Queue the existing development workflow without changing its contract."""
+    return _queue(
+        workspace,
+        prompt,
+        provider=provider,
+        request_kind=REQUEST_DEVELOPMENT,
+    )
+
+
+def queue_operational_request(
+    request_workspace: Path,
+    prompt: str,
+    *,
+    mission_id: str,
+    context_zip: Path,
+    provider: str = "chatgpt",
+) -> dict[str, Any]:
+    context = context_zip.expanduser()
+    if context.is_symlink():
+        raise ValueError("Il pacchetto della missione non può essere un link simbolico.")
+    context = context.resolve(strict=True)
+    if not context.is_file() or context.suffix.casefold() != ".zip":
+        raise ValueError("Il pacchetto della missione non è uno ZIP valido.")
+    clean_mission_id = mission_id.strip()
+    if len(clean_mission_id) != 32 or any(
+        character not in "0123456789abcdef" for character in clean_mission_id
+    ):
+        raise ValueError("L’identificativo della missione operativa non è valido.")
+    return _queue(
+        request_workspace,
+        prompt,
+        provider=provider,
+        request_kind=REQUEST_OPERATIONAL,
+        mission_id=clean_mission_id,
+        context_zip=context,
+    )
+
+
+def _queue(
+    workspace: Path,
+    prompt: str,
+    *,
+    provider: str,
+    request_kind: str,
+    mission_id: str = "",
+    context_zip: Path | None = None,
+) -> dict[str, Any]:
     resolved = workspace.expanduser().resolve(strict=True)
     if not resolved.is_dir():
         raise ValueError("Il workspace dell’automazione non è valido.")
     text = prompt.strip()
     if not text:
         raise ValueError("La richiesta da inviare all’estensione è vuota.")
+    if request_kind not in {REQUEST_DEVELOPMENT, REQUEST_OPERATIONAL}:
+        raise ValueError("Tipo di richiesta dell’estensione non supportato.")
     now = time.time()
     request = {
         "request_id": secrets.token_urlsafe(18),
+        "request_kind": request_kind,
+        "mission_id": mission_id,
         "workspace": str(resolved),
         "provider": provider.strip().lower() or "chatgpt",
         "prompt": text,
         "status": "queued",
-        "message": "Richiesta pronta per l’estensione.",
+        "message": (
+            "Missione pronta per l’estensione."
+            if request_kind == REQUEST_OPERATIONAL
+            else "Richiesta pronta per l’estensione."
+        ),
         "created_at": now,
         "updated_at": now,
         "claimed_at": 0.0,
         "response_text": "",
-        "context_zip_path": "",
-        "context_filename": "",
+        "context_zip_path": str(context_zip) if context_zip else "",
+        "context_filename": context_zip.name if context_zip else "",
         "requested_files": [],
         "update_zip_path": "",
+        "result_zip_path": "",
+        "result_preview": {},
         "plan_id": "",
         "pre_apply": {},
         "error": "",
@@ -173,14 +232,22 @@ def claim_request() -> dict[str, Any] | None:
             return None
         now = time.time()
         request["status"] = "sent"
-        request["message"] = "Richiesta consegnata all’estensione."
+        request["message"] = (
+            "Missione consegnata all’estensione."
+            if request.get("request_kind") == REQUEST_OPERATIONAL
+            else "Richiesta consegnata all’estensione."
+        )
         request["claimed_at"] = now
         request["updated_at"] = now
         return {
             "request_id": request["request_id"],
+            "request_kind": request.get("request_kind", REQUEST_DEVELOPMENT),
+            "mission_id": request.get("mission_id", ""),
             "provider": request["provider"],
             "prompt": request["prompt"],
             "workspace": request["workspace"],
+            "context_zip_path": request.get("context_zip_path", ""),
+            "context_filename": request.get("context_filename", ""),
         }
 
     return _mutate(claim)
@@ -246,6 +313,17 @@ def mark_waiting_update(request_id: str) -> dict[str, Any]:
     return _mutate(update)
 
 
+def mark_waiting_result(request_id: str) -> dict[str, Any]:
+    def update(state: dict[str, Any]) -> dict[str, Any]:
+        request = _request_for_id(state, request_id)
+        request["status"] = "waiting_result"
+        request["message"] = "In attesa dello ZIP dei risultati dell’AI."
+        request["updated_at"] = time.time()
+        return dict(request)
+
+    return _mutate(update)
+
+
 def mark_update_ready(
     request_id: str,
     path: Path,
@@ -264,6 +342,28 @@ def mark_update_ready(
         request["pre_apply"] = dict(pre_apply or {})
         request["status"] = "update_ready"
         request["message"] = "Aggiornamento pronto: controlla l’anteprima e applicalo manualmente."
+        request["updated_at"] = time.time()
+        request["error"] = ""
+        return dict(request)
+
+    return _mutate(update)
+
+
+def mark_result_ready(
+    request_id: str,
+    path: Path,
+    preview: dict[str, Any],
+) -> dict[str, Any]:
+    resolved = path.expanduser().resolve(strict=True)
+    if not resolved.is_file():
+        raise ValueError("Lo ZIP dei risultati non è valido.")
+
+    def update(state: dict[str, Any]) -> dict[str, Any]:
+        request = _request_for_id(state, request_id)
+        request["result_zip_path"] = str(resolved)
+        request["result_preview"] = dict(preview)
+        request["status"] = "result_ready"
+        request["message"] = "Risultati pronti: controllali e importali nella cartella autorizzata."
         request["updated_at"] = time.time()
         request["error"] = ""
         return dict(request)

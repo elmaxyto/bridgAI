@@ -258,7 +258,12 @@ class BrowserExtensionActionsMixin:
             request = snapshot.get("request")
             if hasattr(self, "browser_extension_status_label"):
                 self.refresh_browser_extension_settings()
-            if not isinstance(request, dict) or self.workspace is None:
+            if not isinstance(request, dict):
+                return
+            if request.get("request_kind") == "operational":
+                self.handle_operational_browser_request(request)
+                return
+            if self.workspace is None:
                 return
             try:
                 request_workspace = Path(str(request.get("workspace", ""))).resolve()

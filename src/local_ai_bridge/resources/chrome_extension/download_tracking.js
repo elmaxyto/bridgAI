@@ -141,7 +141,7 @@ self.BridgAIDownloadTracking = {
           download_id: item.id
         })
       });
-      if (payload.action === "update_ready") {
+      if (["update_ready", "result_ready"].includes(payload.action)) {
         await clear(pending.requestId);
       }
     }

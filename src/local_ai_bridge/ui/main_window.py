@@ -19,15 +19,27 @@ from PySide6.QtWidgets import (
 from local_ai_bridge import __version__
 from local_ai_bridge.core.models import ChangePlan
 from local_ai_bridge.core.sessions import SessionManager
-from local_ai_bridge.core.settings import AppSettings, SettingsStore, app_data_dir
+from local_ai_bridge.core.settings import (
+    AppSettings,
+    OPERATIONS_MODE,
+    PRIMARY_MODES,
+    SettingsStore,
+    app_data_dir,
+)
 from local_ai_bridge.core.skills import SkillContext, SkillRegistry
 from local_ai_bridge.services.apply import ApplyService
+from local_ai_bridge.services.operational_execution import OperationalMissionExecutor
+from local_ai_bridge.services.operational_missions import OperationalMissionStore
 from local_ai_bridge.web.launcher import stop_web_interface
 from local_ai_bridge.skills.builtins import register_builtin_skills
+from local_ai_bridge.ui.ai_assistant_actions import AIAssistantActionsMixin
+from local_ai_bridge.ui.application_modes import choose_initial_primary_mode
 from local_ai_bridge.ui.browser_extension_actions import BrowserExtensionActionsMixin
 from local_ai_bridge.ui.change_actions import ChangeActionsMixin
 from local_ai_bridge.ui.github_actions import GitHubActionsMixin
 from local_ai_bridge.ui.layouts import build_central_ui
+from local_ai_bridge.ui.operations_actions import OperationsActionsMixin
+from local_ai_bridge.ui.tabs.operations import build_operations_tab
 from local_ai_bridge.ui.recent_projects import RecentProjectsMixin
 from local_ai_bridge.ui.theme import application_style
 from local_ai_bridge.ui.system_actions import SystemActionsMixin
@@ -63,6 +75,7 @@ def _reset_project_ui(window) -> None:
         'report_edit',
         'response_edit',
         'markdown_result_edit',
+        'text_update_path_edit',
         'gemini_result_edit',
         'target_edit',
         'zip_path_edit',
@@ -94,7 +107,7 @@ def _reset_project_ui(window) -> None:
         apply_button.setEnabled(False)
 
 
-class MainWindow(WorkflowActionsMixin, BrowserExtensionActionsMixin, ChangeActionsMixin, SystemActionsMixin, SettingsActionsMixin, GitHubActionsMixin, ToolActionsMixin, RecentProjectsMixin, QMainWindow):
+class MainWindow(WorkflowActionsMixin, BrowserExtensionActionsMixin, ChangeActionsMixin, SystemActionsMixin, SettingsActionsMixin, OperationsActionsMixin, AIAssistantActionsMixin, GitHubActionsMixin, ToolActionsMixin, RecentProjectsMixin, QMainWindow):
 
     def __init__(self) -> None:
         super().__init__()
@@ -113,12 +126,24 @@ class MainWindow(WorkflowActionsMixin, BrowserExtensionActionsMixin, ChangeActio
         self.web_process = None
         self.session_manager = SessionManager()
         self.apply_service = ApplyService(self.session_manager)
+        self.mission_store = OperationalMissionStore()
+        self.mission_executor = OperationalMissionExecutor(self.mission_store)
+        self._operational_execution_in_progress = False
+        self._operational_pending_result_path = ""
+        self._operational_pending_result_mission_id = ""
+        self._operational_seen_result_path = ""
+        self._operational_seen_error_key = ""
         self.registry = SkillRegistry()
         register_builtin_skills(self.registry)
         self._build_toolbar()
-        self.setCentralWidget(build_central_ui(self))
+        central_ui = build_central_ui(self)
+        self.operations_tab = build_operations_tab(self)
+        self.tabs.insertTab(0, self.operations_tab, _('Modalità Operativa'))
+        self.refresh_operational_missions()
+        self.setCentralWidget(central_ui)
         self.setStatusBar(QStatusBar(self))
         self._show_status(_('Pronto. Seleziona una cartella di lavoro.'))
+        self._ensure_primary_mode()
         self._load_last_workspace()
         self._refresh_skills()
         self._refresh_sessions()
@@ -136,27 +161,69 @@ class MainWindow(WorkflowActionsMixin, BrowserExtensionActionsMixin, ChangeActio
     def apply_theme(self) -> None:
         self.setStyleSheet(application_style(bool(self.settings.dark_mode)))
 
+    def _ensure_primary_mode(self) -> None:
+        if self.settings.primary_mode in PRIMARY_MODES:
+            return
+        self.settings.primary_mode = choose_initial_primary_mode(self)
+        self.settings_store.save(self.settings)
+        self.refresh_primary_mode_settings()
+
     def apply_simple_mode(self) -> None:
+        operations = self.settings.primary_mode == OPERATIONS_MODE
+        operations_index = self.tabs.indexOf(self.operations_tab)
+        settings_index = self.tabs.indexOf(self.settings_tab)
+        if operations_index >= 0:
+            self.tabs.setTabVisible(operations_index, operations)
+        if operations:
+            self.project_panel.setVisible(False)
+            for tab in (
+                self.workflow_tab,
+                self.changes_tab,
+                self.tests_tab,
+                self.publication_tab,
+                self.advanced_tab,
+            ):
+                index = self.tabs.indexOf(tab)
+                if index >= 0:
+                    self.tabs.setTabVisible(index, False)
+            if settings_index >= 0:
+                self.tabs.setTabVisible(settings_index, True)
+                self.tabs.setTabText(settings_index, _('Impostazioni'))
+            if self.tabs.currentWidget() is not self.settings_tab:
+                self.tabs.setCurrentWidget(self.operations_tab)
+            if self.isFullScreen() or self.isMaximized():
+                self.showNormal()
+            self.resize(960, 720)
+            return
+
         simple = bool(self.settings.simple_mode)
-        gemini_simple = simple and bool(self.settings.gemini_drive_enabled)
-        markdown_simple = simple and bool(self.settings.markdown_exchange_mode)
+        markdown_files = simple and bool(self.settings.markdown_exchange_mode)
+        text_updates = bool(self.settings.textual_file_operations_mode)
+        drive_zip = (
+            simple
+            and bool(self.settings.gemini_drive_enabled)
+            and not markdown_files
+        )
         if simple:
             if self.isFullScreen() or self.isMaximized():
                 self.showNormal()
             self.resize(SIMPLE_MODE_WIDTH, SIMPLE_MODE_HEIGHT)
         else:
-            self.showMaximized()
+            if self.isVisible():
+                self.showMaximized()
+            else:
+                QTimer.singleShot(0, self.showMaximized)
         self.project_panel.setVisible(not simple)
         changes_index = self.tabs.indexOf(self.changes_tab)
         tests_index = self.tabs.indexOf(self.tests_tab)
         publication_index = self.tabs.indexOf(self.publication_tab)
         advanced_index = self.tabs.indexOf(self.advanced_tab)
         if changes_index >= 0:
-            self.tabs.setTabVisible(changes_index, not simple or gemini_simple or markdown_simple)
+            self.tabs.setTabVisible(changes_index, not simple or text_updates)
             self.tabs.setTabText(
                 changes_index,
                 _('Anteprima e applicazione')
-                if gemini_simple or markdown_simple else _('2. ZIP, diff e applicazione'),
+                if text_updates else _('2. ZIP, diff e applicazione'),
             )
         if publication_index >= 0:
             self.tabs.setTabVisible(publication_index, True)
@@ -167,34 +234,39 @@ class MainWindow(WorkflowActionsMixin, BrowserExtensionActionsMixin, ChangeActio
         workflow_index = self.tabs.indexOf(self.workflow_tab)
         settings_index = self.tabs.indexOf(self.settings_tab)
         if workflow_index >= 0:
+            self.tabs.setTabVisible(workflow_index, True)
             self.tabs.setTabText(workflow_index, _('Assistente') if simple else _('1. Report e risposta AI'))
         if settings_index >= 0:
+            self.tabs.setTabVisible(settings_index, True)
             self.tabs.setTabText(settings_index, _('Preferenze') if simple else _('Impostazioni'))
         self.simple_welcome.setVisible(simple)
         self.simple_subtitle.setVisible(simple)
-        self.simple_finish_hint.setVisible(simple and not markdown_simple)
-        if gemini_simple:
-            finish_hint = _('Dopo la creazione dello ZIP, in Gemini premi “+”, scegli “Aggiungi da Drive”, apri “Recenti” e seleziona il file più recente.')
-        elif markdown_simple:
-            finish_hint = _('3  Carica il file Markdown nell’AI, incolla qui il documento modificato e premi “Analizza risposta”. Controlla sempre l’anteprima prima di applicare.')
-        else:
-            finish_hint = _('3  Quando ricevi uno ZIP dall’AI, salvalo nella cartella scelta e premi “Applica aggiornamento”. Prima dell’applicazione verrà sempre mostrata un’anteprima.')
-        self.simple_finish_hint.setText(finish_hint)
+        self.simple_finish_hint.setVisible(simple and not text_updates)
+        self.simple_finish_hint.setText(
+            _('3  Quando ricevi uno ZIP dall’AI, salvalo nella cartella scelta e premi “Applica aggiornamento”. Prima dell’applicazione verrà sempre mostrata un’anteprima.')
+        )
         self.report_edit.setVisible(not simple)
         self.prompt_preset_label.setVisible(not simple)
         self.prompt_preset_combo.setVisible(not simple)
         for button in self.report_extra_buttons:
             button.setVisible(not simple)
-        self.simple_chatgpt_button.setVisible(simple and not gemini_simple)
-        self.simple_claude_button.setVisible(simple and not gemini_simple)
-        self.simple_gemini_button.setVisible(gemini_simple)
-        if gemini_simple:
-            response_title = _('Incolla la richiesta di file di Gemini')
-            response_description = _('Copia la risposta con la riga #scarica, poi prepara lo ZIP da aggiungere alla chat tramite Google Drive.')
-            response_placeholder = _('Incolla qui la risposta di Gemini che contiene #scarica...')
-        elif markdown_simple:
+        self.simple_chatgpt_button.setVisible(simple)
+        self.simple_claude_button.setVisible(simple)
+        self.simple_gemini_button.setVisible(simple)
+        if simple:
             response_title = _('Incolla la richiesta di file dell’AI')
-            response_description = _('Copia la risposta con la riga #scarica, poi prepara il Markdown da caricare nella chat.')
+            if markdown_files:
+                response_description = _(
+                    'Copia la risposta con la riga #scarica, poi prepara il Markdown con i file completi.'
+                )
+            elif drive_zip:
+                response_description = _(
+                    'Copia la risposta con la riga #scarica, poi prepara lo ZIP nella cartella Google Drive.'
+                )
+            else:
+                response_description = _(
+                    'Copia la risposta con la riga #scarica, poi prepara lo ZIP con i file richiesti.'
+                )
             response_placeholder = _('Incolla qui la risposta dell’AI che contiene #scarica...')
         else:
             response_title = _('Incolla la risposta dell’AI')
@@ -204,12 +276,12 @@ class MainWindow(WorkflowActionsMixin, BrowserExtensionActionsMixin, ChangeActio
         self.response_step_header.description_label.setText(response_description)
         self.response_edit.setPlaceholderText(response_placeholder)
         self.simple_prepare_files_button.setText(
-            _('Prepara ZIP su Google Drive')
-            if gemini_simple else _('Prepara Markdown')
-            if markdown_simple else _('Prepara i file richiesti')
+            _('Prepara Markdown')
+            if markdown_files else _('Prepara ZIP su Google Drive')
+            if drive_zip else _('Prepara ZIP richiesto')
         )
-        self.gemini_result_group.setVisible(gemini_simple)
-        self.markdown_result_group.setVisible(markdown_simple)
+        self.text_result_group.setVisible(text_updates)
+        self.markdown_result_group.setVisible(False)
         self.target_edit.setVisible(not simple)
         label = self.target_form.labelForField(self.target_edit)
         if label is not None:
@@ -218,28 +290,28 @@ class MainWindow(WorkflowActionsMixin, BrowserExtensionActionsMixin, ChangeActio
             button.setVisible(not simple)
         for button in self.simple_response_buttons:
             button.setVisible(simple)
-        self.simple_apply_zip_button.setVisible(simple and not gemini_simple and not markdown_simple)
+        self.simple_apply_zip_button.setVisible(simple and not text_updates)
         self.simple_patch_directory_button.setVisible(
-            simple and not gemini_simple and not markdown_simple
+            simple and not text_updates
             and not bool(self.settings.update_zip_directory.strip())
         )
-        self.update_zip_settings_group.setVisible(not gemini_simple and not markdown_simple)
+        self.update_zip_settings_group.setVisible(not text_updates)
         self.other_llm_settings_group.setVisible(not simple)
-        self.change_source_group.setVisible(not gemini_simple)
-        self.change_rollback_button.setVisible(not gemini_simple)
+        self.change_source_group.setVisible(not simple)
+        self.change_rollback_button.setVisible(not simple)
         self.restart_action.setVisible(not simple)
         self.simple_restart_button.setVisible(simple)
         for group in getattr(self, 'advanced_settings_groups', []):
             group.setVisible(not simple)
-        self.gemini_drive_settings_group.setVisible(not simple or not markdown_simple)
-        self.markdown_exchange_settings_group.setVisible(not simple or markdown_simple)
-        if gemini_simple:
-            self.report_button.setText(_('Prepara per Gemini'))
-        else:
-            self.report_button.setText(_('Prepara richiesta per l’AI') if simple else _('Genera Super-Report'))
+        self.gemini_drive_settings_group.setVisible(not simple)
+        self.markdown_exchange_settings_group.setVisible(not simple)
+        self.textual_file_operations_settings_group.setVisible(not simple)
+        self.report_button.setText(
+            _('Prepara richiesta per l’AI') if simple else _('Genera Super-Report')
+        )
         allowed_simple_tabs = (
             (self.workflow_tab, self.publication_tab, self.settings_tab, self.changes_tab)
-            if gemini_simple or markdown_simple
+            if text_updates
             else (self.workflow_tab, self.publication_tab, self.settings_tab)
         )
         if simple and self.tabs.currentWidget() not in allowed_simple_tabs:
@@ -458,16 +530,28 @@ class MainWindow(WorkflowActionsMixin, BrowserExtensionActionsMixin, ChangeActio
         self.statusBar().showMessage(text)
 
     def dragEnterEvent(self, event: QDragEnterEvent) -> None:
-        if any((url.toLocalFile().lower().endswith('.zip') for url in event.mimeData().urls())):
+        suffixes = {'.zip'}
+        if self.settings.textual_file_operations_mode:
+            suffixes.update({'.md', '.txt'})
+        if any(Path(url.toLocalFile()).suffix.casefold() in suffixes for url in event.mimeData().urls()):
             event.acceptProposedAction()
 
     def dropEvent(self, event: QDropEvent) -> None:
         for url in event.mimeData().urls():
-            path = url.toLocalFile()
-            if path.lower().endswith('.zip'):
-                self.zip_path_edit.setText(path)
-                self.tabs.setCurrentIndex(1)
+            path = Path(url.toLocalFile())
+            suffix = path.suffix.casefold()
+            if suffix == '.zip':
+                self.zip_path_edit.setText(str(path))
+                self.tabs.setCurrentWidget(self.changes_tab)
                 self.inspect_selected_zip()
+                event.acceptProposedAction()
+                return
+            if (
+                self.settings.textual_file_operations_mode
+                and suffix in {'.md', '.txt'}
+            ):
+                self._set_text_update_path(path)
+                self.tabs.setCurrentWidget(self.workflow_tab)
                 event.acceptProposedAction()
                 return
 

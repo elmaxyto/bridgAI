@@ -5,7 +5,6 @@ from types import SimpleNamespace
 
 from local_ai_bridge.core import settings as settings_module
 from local_ai_bridge.services import browser_extension
-from local_ai_bridge.ui import browser_extension_actions
 
 
 def _use_temp_exchange(monkeypatch, tmp_path: Path) -> None:
@@ -97,6 +96,8 @@ def test_extension_local_bridge_fetches_run_in_service_worker() -> None:
 
     assert 'message?.type === "BRIDGAI_VERIFY"' in background
     assert "artifactBase64" in background
+    assert "request.initial_attachment" in background
+    assert 'type: "BRIDGAI_ATTACH_CONTEXT"' in background
     assert 'type: "BRIDGAI_VERIFY"' in options
     assert "fetch(`http://127.0.0.1:" not in options
     assert "fetch(message.artifactUrl" not in content
@@ -112,6 +113,7 @@ def test_extension_local_bridge_fetches_run_in_service_worker() -> None:
     assert 'message?.type === "BRIDGAI_EXPECT_ZIP_DOWNLOAD"' in background
     assert 'type: "BRIDGAI_EXPECT_ZIP_DOWNLOAD"' in content
     assert '"/api/extension/download-complete"' in downloads
+    assert '"result_ready"' in downloads
     assert "chrome.downloads.onCreated" in downloads
     assert "chrome.downloads.onChanged" in downloads
     assert "chrome.downloads.onDeterminingFilename" in downloads

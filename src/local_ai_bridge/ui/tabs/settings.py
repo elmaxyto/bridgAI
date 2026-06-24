@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from local_ai_bridge.i18n import tr as _
+from local_ai_bridge.ui.tabs.ai_assistant import build_ai_assistant_settings_group
 from local_ai_bridge.ui.widgets import ToggleSwitch, _button
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
@@ -11,6 +12,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QScrollArea,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -57,6 +59,23 @@ def build_settings_tab(window) -> QWidget:
 
     interface_group = QGroupBox(_('Interfaccia'))
     interface_layout = QVBoxLayout(interface_group)
+
+    primary_mode_section, primary_mode_layout = _section('Modalità principale')
+    primary_mode_layout.addWidget(
+        _wrapped_label(
+            'Scegli l’esperienza mostrata normalmente all’avvio. La scelta non cambia il tipo '
+            'di workspace e può essere modificata in qualsiasi momento.'
+        )
+    )
+    primary_mode_form = QFormLayout()
+    window.primary_mode_combo = QComboBox()
+    window.primary_mode_combo.addItem(_('Modalità Sviluppo'), 'development')
+    window.primary_mode_combo.addItem(_('Modalità Operativa'), 'operations')
+    window.primary_mode_combo.currentIndexChanged.connect(window.save_primary_mode)
+    primary_mode_form.addRow(_('Modalità:'), window.primary_mode_combo)
+    primary_mode_layout.addLayout(primary_mode_form)
+    interface_layout.addWidget(primary_mode_section)
+
     window.simple_mode_check = ToggleSwitch(_('Modalità super semplice'))
     window.simple_mode_check.setToolTip(
         _('Mostra un flusso guidato e mantiene le funzioni avanzate nascoste.')
@@ -136,6 +155,9 @@ def build_settings_tab(window) -> QWidget:
     layout.addWidget(folders_group)
     window.update_zip_settings_group = folders_group
     window.update_zip_settings_section = updates_section
+
+    window.ai_assistant_settings_group = build_ai_assistant_settings_group(window)
+    layout.addWidget(window.ai_assistant_settings_group)
 
     web_group = QGroupBox(_('Interfaccia Web UI'))
     web_group_layout = QVBoxLayout(web_group)
@@ -246,33 +268,132 @@ def build_settings_tab(window) -> QWidget:
     window.project_root_settings_group = projects_section
     window.advanced_settings_groups.append(web_group)
 
-    other_models_group = QGroupBox(_('Altri modelli LLM (Beta)'))
+    other_models_group = QGroupBox(_('Formati di scambio con AI Web'))
     other_models_layout = QVBoxLayout(other_models_group)
-    beta_warning = _wrapped_label(
-        'Queste modalità sono in beta: il funzionamento non è garantito. Per il flusso più '
-        'affidabile consigliamo ChatGPT o Claude. Puoi comunque provarle, controllando sempre '
-        'con attenzione l’anteprima prima di applicare modifiche.'
-    )
-    beta_warning.setProperty('class', 'warningBanner')
-    other_models_layout.addWidget(beta_warning)
     other_models_layout.addWidget(
         _wrapped_label(
-            'Gemini e Markdown Exchange sono modalità alternative: attivandone una, l’altra '
-            'viene disattivata automaticamente.'
+            'Il flusso standard resta ZIP → ZIP. Cambia questi formati solo quando la Web AI '
+            'non supporta gli archivi o restituisce più facilmente un file Markdown di aggiornamento.'
         )
     )
 
-    gemini_section, drive_layout = _section('Utilizzo Gemini')
+    requested_files_section, requested_files_layout = _section(
+        'Formato dei file richiesti'
+    )
+    requested_files_layout.addWidget(
+        _wrapped_label(
+            'Stabilisce cosa produce BridgAI quando l’AI risponde con #scarica.'
+        )
+    )
+    window.requested_files_format_combo = QComboBox()
+    window.requested_files_format_combo.addItem(_('ZIP — consigliato'), 'zip')
+    window.requested_files_format_combo.addItem(
+        _('Markdown — per AI senza supporto ZIP'), 'markdown'
+    )
+    window.requested_files_format_combo.currentIndexChanged.connect(
+        lambda index: window.set_requested_files_format(
+            window.requested_files_format_combo.itemData(index)
+        )
+    )
+    requested_files_layout.addWidget(window.requested_files_format_combo)
+    requested_files_layout.addWidget(
+        _wrapped_label(
+            'Il Markdown contiene percorsi e contenuti completi dei file testuali; i file binari '
+            'vengono segnalati ma non incorporati.'
+        )
+    )
+    other_models_layout.addWidget(requested_files_section)
+    window.markdown_exchange_settings_group = requested_files_section
+
+    update_format_section, update_format_layout = _section(
+        'Formato delle modifiche proposte'
+    )
+    update_format_layout.addWidget(
+        _wrapped_label(
+            'Stabilisce cosa deve restituire l’AI dopo aver ricevuto il contesto.'
+        )
+    )
+    window.update_format_combo = QComboBox()
+    window.update_format_combo.addItem(_('ZIP — consigliato'), 'zip')
+    window.update_format_combo.addItem(_('File Markdown di aggiornamento'), 'text')
+    window.update_format_combo.currentIndexChanged.connect(
+        lambda index: window.set_update_format(
+            window.update_format_combo.itemData(index)
+        )
+    )
+    update_format_layout.addWidget(window.update_format_combo)
+    update_format_layout.addWidget(
+        _wrapped_label(
+            'Con il file Markdown di aggiornamento BridgAI richiede operazioni CREATE, REPLACE e DELETE, '
+            'mostra il diff e applica lo stesso piano transazionale usato dagli ZIP.'
+        )
+    )
+    other_models_layout.addWidget(update_format_section)
+    window.textual_file_operations_settings_group = update_format_section
+
+    compatibility_button = QToolButton()
+    compatibility_button.setObjectName('aiWebCompatibilityButton')
+    compatibility_button.setText(_('Compatibilità con le AI Web'))
+    compatibility_button.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+    compatibility_button.setArrowType(Qt.RightArrow)
+    compatibility_button.setCheckable(True)
+    compatibility_button.setAccessibleName(_('Compatibilità con le AI Web'))
+    other_models_layout.addWidget(compatibility_button)
+
+    compatibility_panel = QWidget()
+    compatibility_panel.setObjectName('aiWebCompatibilityPanel')
+    compatibility_layout = QVBoxLayout(compatibility_panel)
+    compatibility_layout.setContentsMargins(8, 4, 8, 8)
+    compatibility_layout.setSpacing(8)
+    compatibility_layout.addWidget(
+        _wrapped_label(
+            'Il formato dei file richiesti è distinto dal formato delle modifiche proposte.'
+        )
+    )
+    compatibility_table = QLabel(
+        _(
+            '<table cellspacing="0" cellpadding="6">'
+            '<tr><th>AI Web</th><th>Formato dei file richiesti</th>'
+            '<th>Formato delle modifiche proposte</th></tr>'
+            '<tr><td><b>ChatGPT</b></td><td>ZIP o Markdown</td><td>ZIP o Markdown</td></tr>'
+            '<tr><td><b>Claude</b></td><td>ZIP o Markdown</td><td>ZIP o Markdown</td></tr>'
+            '<tr><td><b>Gemini Pro</b></td><td>ZIP o Markdown</td><td>Markdown</td></tr>'
+            '<tr><td><b>Perplexity</b></td><td>Markdown consigliato</td><td>Markdown</td></tr>'
+            '<tr><td><b>Microsoft Copilot</b></td><td>Markdown</td><td>Markdown</td></tr>'
+            '</table>'
+        )
+    )
+    compatibility_table.setObjectName('aiWebCompatibilityTable')
+    compatibility_table.setTextFormat(Qt.RichText)
+    compatibility_table.setWordWrap(True)
+    compatibility_layout.addWidget(compatibility_table)
+    compatibility_layout.addWidget(
+        _wrapped_label(
+            'Markdown offre la massima compatibilità generale. Il supporto ZIP per i file richiesti '
+            'non implica il supporto ZIP per le modifiche proposte.'
+        )
+    )
+    compatibility_panel.setVisible(False)
+    compatibility_button.toggled.connect(compatibility_panel.setVisible)
+    compatibility_button.toggled.connect(
+        lambda expanded: compatibility_button.setArrowType(
+            Qt.DownArrow if expanded else Qt.RightArrow
+        )
+    )
+    other_models_layout.addWidget(compatibility_panel)
+    window.ai_web_compatibility_button = compatibility_button
+    window.ai_web_compatibility_panel = compatibility_panel
+
+    gemini_section, drive_layout = _section('Trasporto ZIP per Gemini')
     drive_layout.addWidget(
         _wrapped_label(
-            'La modalità Gemini sostituisce ChatGPT e Claude nel flusso semplice. BridgAI crea '
-            'lo ZIP dei file richiesti nella cartella Drive, la cui sincronizzazione resta '
-            'affidata al client ufficiale Google Drive. Gemini restituisce poi testo con '
-            'percorsi e blocchi SEARCH/REPLACE, analizzato localmente prima dell’applicazione.'
+            'Google Drive è soltanto un canale di trasferimento per gli ZIP destinati a Gemini. '
+            'Non cambia il formato delle modifiche e viene ignorato quando i file richiesti sono '
+            'esportati come Markdown.'
         )
     )
     window.gemini_drive_enabled_check = ToggleSwitch(
-        _('Abilita modalità Gemini con Google Drive')
+        _('Salva gli ZIP dei file richiesti nella cartella Google Drive')
     )
     window.gemini_drive_enabled_check.toggled.connect(window.set_gemini_drive_enabled)
     drive_layout.addWidget(window.gemini_drive_enabled_check)
@@ -294,22 +415,6 @@ def build_settings_tab(window) -> QWidget:
     other_models_layout.addWidget(gemini_section)
     window.gemini_drive_settings_group = gemini_section
 
-    markdown_section, markdown_layout = _section('Utilizzo Markdown')
-    markdown_layout.addWidget(
-        _wrapped_label('Attiva per usare file .md invece di ZIP con modelli come Perplexity')
-    )
-    window.markdown_exchange_mode_check = ToggleSwitch(
-        _('Esporta file come Markdown / Importa risposta Markdown')
-    )
-    window.markdown_exchange_mode_check.setToolTip(
-        _('I file binari vengono segnalati ma non incorporati nel documento Markdown.')
-    )
-    window.markdown_exchange_mode_check.toggled.connect(window.set_markdown_exchange_mode)
-    markdown_layout.addWidget(window.markdown_exchange_mode_check)
-    other_models_layout.addWidget(markdown_section)
-    window.markdown_exchange_settings_group = markdown_section
-    window.advanced_settings_groups.append(markdown_section)
-
     layout.addWidget(other_models_group)
     window.other_llm_settings_group = other_models_group
 
@@ -317,9 +422,12 @@ def build_settings_tab(window) -> QWidget:
     scroll_area.setWidget(content)
     page_layout.addWidget(scroll_area)
     window.settings_scroll_area = scroll_area
+    window.refresh_primary_mode_settings()
     window.refresh_prompt_settings()
     window.refresh_web_settings()
     window.refresh_temp_settings()
+    window.refresh_ai_assistant_settings()
     window.refresh_gemini_drive_settings()
     window.refresh_markdown_exchange_settings()
+    window.refresh_textual_file_operations_settings()
     return page

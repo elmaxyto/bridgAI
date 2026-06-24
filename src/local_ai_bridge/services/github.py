@@ -21,6 +21,10 @@ from local_ai_bridge.services.git import (
     is_git_repository,
     validate_remote_name,
 )
+from local_ai_bridge.services.gitignore import (
+    ensure_publish_gitignore,
+    gitignore_update_needed,
+)
 
 
 _GITHUB_HOST = "github.com"
@@ -293,7 +297,6 @@ def connect_github_repository(
     )
 
 
-
 def _repository_slug(remote_url: str | None) -> str | None:
     if not remote_url:
         return None
@@ -311,15 +314,20 @@ def _repository_web_url(remote_url: str | None) -> str | None:
 
 def simple_github_status(workspace: Path) -> dict[str, object]:
     """Return the small set of facts needed by the one-click GitHub UI."""
-    remote = git_remote_url(workspace, "origin") if is_git_repository(workspace) else None
-    changes = _current_changes(workspace) if is_git_repository(workspace) else []
+    repository = is_git_repository(workspace)
+    remote = git_remote_url(workspace, "origin") if repository else None
+    changes = _current_changes(workspace) if repository else []
+    gitignore_pending = gitignore_update_needed(workspace) if repository else False
+    gitignore_already_changed = any(path.replace("\\", "/") == ".gitignore" for _action, path in changes)
+    change_count = len(changes) + int(gitignore_pending and not gitignore_already_changed)
     return {
         "git_available": git_available(),
         "github_cli_available": github_cli_available(),
-        "is_repository": is_git_repository(workspace),
+        "is_repository": repository,
         "published": bool(remote),
-        "has_changes": bool(changes),
-        "change_count": len(changes),
+        "has_changes": change_count > 0,
+        "change_count": change_count,
+        "gitignore_update_pending": gitignore_pending,
         "repository_name": _repository_slug(remote),
         "suggested_repository_name": workspace.name,
         "repository_url": _repository_web_url(remote),
@@ -353,6 +361,7 @@ def publish_or_update_github(
     if not is_git_repository(workspace):
         git_init(workspace)
 
+    protection = ensure_publish_gitignore(workspace)
     changes = _current_changes(workspace)
     commit_created = False
     commit_message = None
@@ -379,12 +388,16 @@ def publish_or_update_github(
         created_repository = True
 
     push_output = push_current_branch(workspace)
+    output_parts = [part for part in (protection.summary, push_output) if part]
     return {
         "message": "Progetto pubblicato su GitHub." if created_repository else "GitHub aggiornato correttamente.",
         "repository_created": created_repository,
         "commit_created": commit_created,
         "commit_message": commit_message,
         "change_count": len(changes),
+        "gitignore_created": protection.created,
+        "gitignore_updated": protection.changed,
+        "untracked_generated_count": len(protection.untracked_paths),
         "repository_url": _repository_web_url(remote),
-        "output": push_output,
+        "output": "\n\n".join(output_parts),
     }

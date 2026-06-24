@@ -122,9 +122,115 @@ def _diagnostics_text(scan) -> str:
     return "\n".join(rows)
 
 
-def build_super_report(root: Path, task: str = "") -> str:
+def _requested_files_protocol(markdown_mode: bool) -> str:
+    if markdown_mode:
+        return """**FORMATO FILE RICHIESTI — Markdown**
+
+Quando richiedi file con `#scarica`, BridgAI creerà un unico documento Markdown con i percorsi e il contenuto completo dei file testuali. I file binari verranno segnalati ma non incorporati.
+
+- Non chiedere ZIP per ricevere il contesto.
+- Considera autorevoli soltanto i contenuti delimitati dai marcatori BridgAI nel documento ricevuto.
+- Il formato della risposta finale resta quello indicato nella sezione successiva."""
+    return """**FORMATO FILE RICHIESTI — ZIP**
+
+Quando richiedi file con `#scarica`, BridgAI creerà uno ZIP con i file reali selezionati e i relativi percorsi di progetto. Allegalo alla conversazione prima di preparare le modifiche finali."""
+
+
+def _text_file_operations_protocol() -> str:
+    return """**FORMATO MODIFICHE — File Markdown di aggiornamento**
+
+Quando il contesto non basta, usa ancora `#scarica` con una singola riga. Dopo aver ricevuto i file necessari, crea un singolo file scaricabile chiamato preferibilmente `bridgai-update.md`.
+
+Il file deve contenere soltanto le operazioni strutturate complete sui file: non produrre ZIP, non usare SEARCH/REPLACE e non aggiungere spiegazioni fuori dai blocchi. Usa il copia-incolla soltanto se l’interfaccia AI non permette di generare un file scaricabile.
+
+**Non copiare valori alternativi o segnaposto.** Ogni campo deve contenere un solo valore letterale. Per esempio, scrivi `OPERATION: REPLACE` e `FINAL_NEWLINE: YES`. Non inserire la parola “oppure”, barre, commenti o più opzioni nella stessa riga.
+
+Per sostituire integralmente un file esistente usa questa forma:
+
+````text
+BEGIN_FILE
+OPERATION: REPLACE
+PATH: src/esempio.py
+FINAL_NEWLINE: YES
+CONTENT:
+```python
+contenuto completo del file
+```
+END_FILE
+````
+
+Per creare un file inesistente usa la stessa forma, ma con una singola riga `OPERATION: CREATE`.
+
+Per eliminare un file esistente usa esattamente:
+
+```text
+BEGIN_FILE
+OPERATION: DELETE
+PATH: percorso/relativo/nomefile.ext
+END_FILE
+```
+
+Regole obbligatorie:
+
+- I soli valori ammessi per `OPERATION` sono `CREATE`, `REPLACE` e `DELETE`.
+- I soli valori ammessi per `FINAL_NEWLINE` sono `YES` e `NO`.
+- `CREATE` è riservato a file che non esistono nel contesto ricevuto.
+- `REPLACE` sostituisce integralmente un file esistente.
+- `DELETE` elimina un file esistente e non deve avere `CONTENT` né `FINAL_NEWLINE`.
+- Ogni percorso deve essere relativo alla root del progetto e comparire una sola volta.
+- Per `CREATE` e `REPLACE` restituisci il file integrale, dall'inizio alla fine.
+- Non usare frammenti, omissioni, segnaposto, “resto invariato” o testo fuori dai blocchi.
+- Non includere file non modificati o estranei al task.
+- Usa `FINAL_NEWLINE: YES` quando il file deve terminare con una nuova riga; altrimenti usa `FINAL_NEWLINE: NO`.
+- Dopo `CONTENT:` apri sempre una fence Markdown. Se il contenuto include tre backtick consecutivi, usa una fence esterna più lunga oppure una fence con tilde.
+- Chiudi la fence del contenuto prima di `END_FILE`.
+- Non racchiudere l'intera risposta in un'ulteriore fence Markdown e non aggiungere titoli, elenchi o commenti alle righe di controllo.
+- Per file binari o non rappresentabili fedelmente come UTF-8, non usare questa modalità: segnala il limite.
+- Se non puoi restituire tutti i file completi richiesti, non inviare un risultato parziale: richiedi prima i file mancanti con `#scarica`.
+
+Controllo finale prima dell'invio:
+
+1. il numero di `BEGIN_FILE` coincide con il numero di `END_FILE`;
+2. ogni blocco contiene un solo `OPERATION` e un solo `PATH`;
+3. ogni blocco `CREATE` o `REPLACE` contiene `FINAL_NEWLINE`, `CONTENT` e una fence chiusa;
+4. non esiste testo prima, tra o dopo i blocchi.
+
+BridgAI analizzerà localmente le operazioni, controllerà i percorsi e l'esistenza dei file, mostrerà il diff e creerà un unico piano transazionale con backup e rollback."""
+
+def _standard_delivery_protocol() -> str:
+    return """**FORMATO MODIFICHE — ZIP**
+
+Formato richiesto per modifiche multi-file: **ZIP**.
+
+- Metti direttamente nella radice dello ZIP la struttura relativa del progetto (`src/`, `tests/`, ecc.).
+- Non aggiungere una cartella contenitore col nome del progetto.
+- `applymanifest.json` è facoltativo; omettilo per il normale mapping percorso→stesso percorso.
+- Non includere file non modificati, segreti o file estranei al task.
+- Includi nella radice dello ZIP un file `commit-message.md` in UTF-8.
+- La prima riga non vuota di `commit-message.md` deve essere un titolo breve e descrittivo del commit.
+- Dopo il titolo aggiungi un elenco sintetico delle modifiche realmente contenute nello ZIP.
+- `commit-message.md` è un metadato per BridgAI: non è un file del progetto e non deve essere applicato al workspace.
+
+Esempio:
+
+```text
+feat(area): descrizione sintetica
+
+- modifica effettiva principale
+- test aggiunti o aggiornati
+```"""
+
+def build_super_report(
+    root: Path,
+    task: str = "",
+    *,
+    settings: AppSettings | None = None,
+) -> str:
     started = time.monotonic()
     root = root.expanduser().resolve(strict=True)
+    settings = settings or SettingsStore().load()
+    markdown_mode = bool(settings.markdown_exchange_mode)
+    textual_mode = bool(settings.textual_file_operations_mode)
     _trace_report(f"START workspace={root}")
     try:
         scan = scan_project(root, task=task)
@@ -154,15 +260,27 @@ def build_super_report(root: Path, task: str = "") -> str:
                 "che possano cambiare concretamente l'implementazione e usa formulazioni comprensibili "
                 "anche a utenti non tecnici. Dopo le risposte, riepiloga brevemente requisiti, assunzioni "
                 "e scelte principali; non prolungare l'intervista quando le informazioni sono sufficienti.\n\n"
-                "Quando puoi procedere, realizza direttamente il task creando da zero tutti i file "
-                "necessari e restituisci un unico archivio ZIP applicabile. Lo ZIP deve contenere nella "
-                "propria radice la struttura completa del nuovo progetto, senza cartella contenitore "
-                "aggiuntiva. Dopo aver prodotto lo ZIP, indica esplicitamente all'utente di usare "
-                "**Applica ZIP**."
+                + (
+                    "Quando puoi procedere, realizza direttamente il task creando da zero tutti i file "
+                    "necessari e restituiscili in un unico file scaricabile `bridgai-update.md` come "
+                    "operazioni `CREATE` complete. Non usare ZIP né `#scarica`."
+                    if textual_mode
+                    else
+                    "Quando puoi procedere, realizza direttamente il task creando da zero tutti i file "
+                    "necessari e restituisci un unico archivio ZIP applicabile. Lo ZIP deve contenere nella "
+                    "propria radice la struttura completa del nuovo progetto, senza cartella contenitore "
+                    "aggiuntiva. Dopo aver prodotto lo ZIP, indica esplicitamente all'utente di usare "
+                    "**Applica ZIP**."
+                )
             )
         project_version = scan.project_version or "non rilevata"
         candidate_text = (
-            "_Workspace vuoto: non richiedere file con `#scarica`; crea direttamente lo ZIP completo._"
+            (
+                "_Workspace vuoto: non richiedere file con `#scarica`; restituisci direttamente "
+                "un file `bridgai-update.md` con operazioni `CREATE` complete._"
+                if textual_mode
+                else "_Workspace vuoto: non richiedere file con `#scarica`; crea direttamente lo ZIP completo._"
+            )
             if workspace_is_empty
             else _candidate_section(root, task)
         )
@@ -176,7 +294,43 @@ def build_super_report(root: Path, task: str = "") -> str:
         )
         git_text = git_snapshot(root)
         notes_text = _notes(root)
-        custom_instructions = _custom_instructions(root)
+        custom_instructions = _custom_instructions(root, settings)
+        delivery_protocol = (
+            f"{_requested_files_protocol(markdown_mode)}\n\n"
+            + (_text_file_operations_protocol() if textual_mode else _standard_delivery_protocol())
+        )
+        delivery_label = (
+            "File Markdown di aggiornamento applicabile"
+            if textual_mode else "ZIP applicabile"
+        )
+        empty_workspace_protocol = (
+            "Se il report dichiara **WORKSPACE VUOTO**, non usare `#scarica`: "
+            "restituisci direttamente un unico file `bridgai-update.md` con tutte le operazioni "
+            "`CREATE` complete."
+            if textual_mode
+            else
+            "Se il report dichiara **WORKSPACE VUOTO**, non usare `#scarica`: crea direttamente "
+            "tutti i file richiesti, restituiscili in un unico ZIP completo e indica all'utente "
+            "di usare **Applica ZIP**."
+        )
+        expected_output = (
+            "Se il contesto non basta, rispondi esclusivamente con la singola riga `#scarica`. "
+            "Dopo aver ricevuto i file necessari, crea e allega un unico file scaricabile "
+            "`bridgai-update.md` contenente esclusivamente i blocchi `BEGIN_FILE` / `END_FILE` "
+            "previsti dal protocollo, senza introduzioni, riepiloghi, testo conclusivo o Markdown "
+            "esterno ai blocchi. Non creare uno ZIP e usa il copia-incolla soltanto se "
+            "l’interfaccia AI non permette di generare un file scaricabile."
+            if textual_mode
+            else
+            "Produci, nell'ordine:\n\n"
+            "1. analisi sintetica del problema;\n"
+            "2. file da richiedere con `#scarica`, se il contesto non basta;\n"
+            "3. piano operativo;\n"
+            f"4. {delivery_label};\n"
+            "5. test da eseguire;\n"
+            "6. rischi residui reali.\n\n"
+            "Non dichiarare che una modifica funziona se non puoi verificarla direttamente."
+        )
         elapsed = time.monotonic() - started
         _trace_report(f"RENDER elapsed={elapsed:.2f}s")
 
@@ -238,40 +392,9 @@ Quando servono file reali, rispondi con una singola riga:
 #scarica percorso/file1.py, percorso/file2.ts, percorso/file3.json
 ```
 
-Se il report dichiara **WORKSPACE VUOTO**, non usare `#scarica`: crea direttamente tutti i file richiesti,
-restituiscili in un unico ZIP completo e indica all'utente di usare **Applica ZIP**.
+{empty_workspace_protocol}
 
-Formato preferito per modifiche multi-file: **ZIP**.
-
-- Metti direttamente nella radice dello ZIP la struttura relativa del progetto (`src/`, `tests/`, ecc.).
-- Non aggiungere una cartella contenitore col nome del progetto.
-- `applymanifest.json` è facoltativo; omettilo per il normale mapping percorso→stesso percorso.
-- Non includere file non modificati, segreti o file estranei al task.
-- Includi nella radice dello ZIP un file `commit-message.md` in UTF-8.
-- La prima riga non vuota di `commit-message.md` deve essere un titolo breve e descrittivo del commit.
-- Dopo il titolo aggiungi un elenco sintetico delle modifiche realmente contenute nello ZIP.
-- `commit-message.md` è un metadato per BridgAI: non è un file del progetto e non deve essere applicato al workspace.
-
-Esempio:
-
-```text
-feat(area): descrizione sintetica
-
-- modifica effettiva principale
-- test aggiunti o aggiornati
-```
-
-Per modifiche chirurgiche a un solo file puoi usare:
-
-```text
-<<<<<<< SEARCH
-codice esatto esistente
-=======
-codice sostitutivo
->>>>>>> REPLACE
-```
-
-Per la sostituzione completa di un file, restituisci il contenuto integrale e indica il percorso target.
+{delivery_protocol}
 
 ## 7. Stato Git
 
@@ -310,16 +433,7 @@ L'indice conserva i percorsi di codice e configurazione; soltanto i sottoalberi 
 
 ## 13. Output atteso dall'AI
 
-{output_guidance}Produci, nell'ordine:
-
-1. analisi sintetica del problema;
-2. file da richiedere con `#scarica`, se il contesto non basta;
-3. piano operativo;
-4. ZIP o patch applicabile;
-5. test da eseguire;
-6. rischi residui reali.
-
-Non dichiarare che una modifica funziona se non puoi verificarla direttamente.
+{output_guidance}{expected_output}
 """
         _trace_report(f"DONE chars={len(report)} elapsed={time.monotonic() - started:.2f}s")
         return report

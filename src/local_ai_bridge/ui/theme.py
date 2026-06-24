@@ -28,7 +28,7 @@ def application_style(dark: bool = False) -> str:
         color: {colors['text']};
     }}
     QMainWindow, QDialog {{ background: {colors['window']}; }}
-    QWidget#workflowPage {{ background: {colors['window']}; }}
+    QWidget#workflowPage, QWidget#operationsPage {{ background: {colors['window']}; }}
     QToolBar {{
         background: {colors['surface']}; border: 0; border-bottom: 1px solid {colors['border']};
         spacing: 8px; padding: 8px 12px;
@@ -36,12 +36,15 @@ def application_style(dark: bool = False) -> str:
     QToolButton {{ color: {colors['text']}; padding: 7px 10px; border-radius: 7px; }}
     QToolButton:hover {{ background: {colors['surface_alt']}; }}
     QTabWidget::pane {{ border: 0; background: {colors['window']}; }}
-    QScrollArea#settingsScrollArea, QScrollArea#advancedScrollArea {{
+    QScrollArea#settingsScrollArea, QScrollArea#advancedScrollArea,
+    QScrollArea#operationsScrollArea {{
         background: {colors['window']}; border: 0;
     }}
     QScrollArea#settingsScrollArea > QWidget > QWidget,
     QScrollArea#advancedScrollArea > QWidget > QWidget,
-    QWidget#settingsScrollContent, QWidget#advancedScrollContent {{
+    QScrollArea#operationsScrollArea > QWidget > QWidget,
+    QWidget#settingsScrollContent, QWidget#advancedScrollContent,
+    QWidget#operationsScrollContent {{
         background: {colors['window']};
     }}
     QTabBar::tab {{
@@ -61,6 +64,31 @@ def application_style(dark: bool = False) -> str:
         background: {colors['surface']}; border: 1px solid {colors['border']};
         border-radius: 12px; margin-top: 0;
     }}
+    QGroupBox[class="operationsCard"] {{
+        background: {colors['surface']}; border: 1px solid {colors['border']};
+        border-radius: 12px; margin-top: 10px;
+    }}
+    QGroupBox[class="operationsCard"]::title {{
+        background: {colors['surface']}; color: {colors['text']};
+        font-weight: 700; padding: 0 7px;
+    }}
+    QWidget[class="operationsFlow"] {{
+        background: {colors['surface']}; border: 1px solid {colors['border']};
+        border-radius: 12px;
+    }}
+    QLabel[class="flowPill"] {{
+        background: {colors['primary_soft']}; color: {colors['primary']};
+        border-radius: 14px; padding: 7px 10px; font-weight: 650;
+    }}
+    QLabel[class="stateBadge"] {{
+        background: {colors['surface_alt']}; color: {colors['muted']};
+        border: 1px solid {colors['border']}; border-radius: 11px;
+        padding: 3px 10px; font-weight: 700;
+    }}
+    QLabel[class="stateBadge"][state="ready"] {{
+        background: {colors['primary_soft']}; color: {colors['primary']};
+        border-color: {colors['primary']};
+    }}
     QLabel {{ color: {colors['text']}; background: transparent; }}
     QLabel[class="pageTitle"] {{ font-size: 22pt; font-weight: 700; color: {colors['text']}; }}
     QLabel[class="pageSubtitle"] {{ font-size: 11pt; color: {colors['muted']}; padding-bottom: 2px; }}
@@ -77,12 +105,18 @@ def application_style(dark: bool = False) -> str:
     QFrame[class="speechNote"] {{
         background: {colors['surface_alt']}; border: 1px solid {colors['border']}; border-radius: 10px;
     }}
-    QPlainTextEdit, QLineEdit, QComboBox {{
+    QPlainTextEdit, QTextEdit, QLineEdit, QComboBox {{
         min-height: 18px;
         background: {colors['surface']}; color: {colors['text']}; border: 1px solid {colors['border']};
         border-radius: 8px; padding: 8px; selection-background-color: {colors['selection']};
     }}
-    QPlainTextEdit:focus, QLineEdit:focus, QComboBox:focus {{ border: 2px solid {colors['primary']}; }}
+    QPlainTextEdit:focus, QTextEdit:focus, QLineEdit:focus, QComboBox:focus {{ border: 2px solid {colors['primary']}; }}
+    QTextEdit#operationsPlanPreview {{
+        background: {colors['banner']}; color: {colors['banner_text']};
+        border-color: {colors['banner_border']};
+    }}
+    QTextEdit#operationsWebStatus {{ background: {colors['surface_alt']}; }}
+    QListWidget#operationsHistoryList::item {{ padding: 8px; }}
     QPushButton {{
         min-height: 34px; padding: 0 14px; border: 1px solid {colors['border']};
         border-radius: 8px; background: {colors['surface']}; color: {colors['text']}; font-weight: 600;
@@ -99,7 +133,10 @@ def application_style(dark: bool = False) -> str:
     }}
     QPushButton[role="icon"]:hover {{ border-color: {colors['primary']}; }}
     QPushButton:disabled {{ background: {colors['disabled']}; color: {colors['disabled_text']}; border-color: {colors['border']}; }}
-    QTreeView, QTableWidget {{ background: {colors['surface']}; color: {colors['text']}; border: 1px solid {colors['border']}; border-radius: 8px; }}
+    QTreeView, QTableWidget, QListWidget {{ background: {colors['surface']}; color: {colors['text']}; border: 1px solid {colors['border']}; border-radius: 8px; }}
+    QTreeView::item:selected, QTableWidget::item:selected, QListWidget::item:selected {{
+        background: {colors['selection']}; color: {colors['text']};
+    }}
     QHeaderView::section {{ background: {colors['surface_alt']}; color: {colors['text']}; border: 0; border-bottom: 1px solid {colors['border']}; padding: 6px; }}
     QStatusBar {{ background: {colors['surface']}; border-top: 1px solid {colors['border']}; color: {colors['muted']}; }}
     QCheckBox {{ color: {colors['text']}; spacing: 8px; }}

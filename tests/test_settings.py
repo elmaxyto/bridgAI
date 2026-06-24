@@ -382,6 +382,13 @@ def test_markdown_exchange_mode_is_backward_compatible(tmp_path: Path) -> None:
     assert store.load().markdown_exchange_mode is False
 
 
+def test_markdown_exchange_mode_rejects_invalid_persisted_value(tmp_path: Path) -> None:
+    store = SettingsStore()
+    store.path = tmp_path / "settings.json"
+    store.path.write_text('{"markdown_exchange_mode": "false"}', encoding="utf-8")
+    assert store.load().markdown_exchange_mode is False
+
+
 
 def test_web_two_factor_settings_round_trip(tmp_path: Path) -> None:
     store = SettingsStore()
@@ -449,3 +456,159 @@ def test_browser_extension_settings_are_backward_compatible(tmp_path: Path) -> N
     assert loaded.browser_extension_auto_export is True
     assert loaded.browser_extension_auto_download is True
     assert loaded.browser_extension_token == ""
+
+
+def test_textual_file_operations_mode_round_trip(tmp_path: Path) -> None:
+    store = SettingsStore()
+    store.path = tmp_path / "settings.json"
+    store.save(AppSettings(textual_file_operations_mode=True))
+    assert store.load().textual_file_operations_mode is True
+
+
+def test_textual_file_operations_mode_is_backward_compatible(tmp_path: Path) -> None:
+    store = SettingsStore()
+    store.path = tmp_path / "settings.json"
+    store.path.write_text('{"language": "it"}', encoding="utf-8")
+    assert store.load().textual_file_operations_mode is False
+
+
+def test_textual_file_operations_mode_rejects_invalid_persisted_value(tmp_path: Path) -> None:
+    store = SettingsStore()
+    store.path = tmp_path / "settings.json"
+    store.path.write_text('{"textual_file_operations_mode": "false"}', encoding="utf-8")
+    assert store.load().textual_file_operations_mode is False
+
+
+
+def test_exchange_format_defaults_remain_zip_to_zip() -> None:
+    settings = AppSettings()
+    assert settings.markdown_exchange_mode is False
+    assert settings.textual_file_operations_mode is False
+
+
+def test_all_exchange_format_combinations_round_trip_independently(
+    tmp_path: Path,
+) -> None:
+    store = SettingsStore()
+    store.path = tmp_path / "settings.json"
+
+    for requested_markdown, update_markdown in (
+        (False, False),
+        (False, True),
+        (True, False),
+        (True, True),
+    ):
+        store.save(
+            AppSettings(
+                markdown_exchange_mode=requested_markdown,
+                textual_file_operations_mode=update_markdown,
+            )
+        )
+        loaded = store.load()
+        assert loaded.markdown_exchange_mode is requested_markdown
+        assert loaded.textual_file_operations_mode is update_markdown
+
+def test_ai_assistant_settings_round_trip(tmp_path: Path) -> None:
+    store = SettingsStore()
+    store.path = tmp_path / "settings.json"
+    settings = AppSettings(
+        ai_assistant_enabled=True,
+        ai_assistant_source="cloud_provider",
+        ai_assistant_gemma_downloaded=True,
+        ai_assistant_ollama_url="http://127.0.0.1:11434",
+        ai_assistant_ollama_model="qwen2.5-coder:7b",
+        ai_assistant_cloud_provider="openrouter",
+        ai_assistant_cloud_key="secret-key",
+        ai_assistant_cloud_model="custom/model-id",
+    )
+
+    store.save(settings)
+    loaded = store.load()
+
+    assert loaded.ai_assistant_enabled is True
+    assert loaded.ai_assistant_source == "cloud_provider"
+    assert loaded.ai_assistant_gemma_downloaded is True
+    assert loaded.ai_assistant_ollama_url == "http://127.0.0.1:11434"
+    assert loaded.ai_assistant_ollama_model == "qwen2.5-coder:7b"
+    assert loaded.ai_assistant_cloud_provider == "openrouter"
+    assert loaded.ai_assistant_cloud_key == "secret-key"
+    assert loaded.ai_assistant_cloud_model == "custom/model-id"
+
+
+def test_ai_assistant_settings_are_backward_compatible(tmp_path: Path) -> None:
+    store = SettingsStore()
+    store.path = tmp_path / "settings.json"
+    store.path.write_text('{"last_workspace": "C:/workspace"}', encoding="utf-8")
+
+    loaded = store.load()
+
+    assert loaded.ai_assistant_enabled is False
+    assert loaded.ai_assistant_source == "gemma_internal"
+    assert loaded.ai_assistant_gemma_downloaded is False
+    assert loaded.ai_assistant_ollama_url == "http://localhost:11434"
+    assert loaded.ai_assistant_ollama_model == ""
+    assert loaded.ai_assistant_cloud_provider == "groq"
+    assert loaded.ai_assistant_cloud_key == ""
+    assert loaded.ai_assistant_cloud_model == ""
+
+
+def test_ai_assistant_settings_reject_invalid_persisted_values(tmp_path: Path) -> None:
+    store = SettingsStore()
+    store.path = tmp_path / "settings.json"
+    store.path.write_text(
+        """{
+          "ai_assistant_enabled": "yes",
+          "ai_assistant_source": "unknown",
+          "ai_assistant_gemma_downloaded": 1,
+          "ai_assistant_ollama_url": 11434,
+          "ai_assistant_ollama_model": [],
+          "ai_assistant_cloud_provider": "unknown",
+          "ai_assistant_cloud_key": null,
+          "ai_assistant_cloud_model": false
+        }""",
+        encoding="utf-8",
+    )
+
+    loaded = store.load()
+
+    assert loaded.ai_assistant_enabled is False
+    assert loaded.ai_assistant_source == "gemma_internal"
+    assert loaded.ai_assistant_gemma_downloaded is False
+    assert loaded.ai_assistant_ollama_url == "http://localhost:11434"
+    assert loaded.ai_assistant_ollama_model == ""
+    assert loaded.ai_assistant_cloud_provider == "groq"
+    assert loaded.ai_assistant_cloud_key == ""
+    assert loaded.ai_assistant_cloud_model == ""
+
+
+def test_primary_mode_round_trip(tmp_path: Path) -> None:
+    from local_ai_bridge.core.settings import OPERATIONS_MODE
+
+    store = SettingsStore()
+    store.path = tmp_path / "settings.json"
+    store.save(AppSettings(primary_mode=OPERATIONS_MODE))
+    assert store.load().primary_mode == OPERATIONS_MODE
+
+
+def test_existing_settings_without_primary_mode_use_development(tmp_path: Path) -> None:
+    from local_ai_bridge.core.settings import DEVELOPMENT_MODE
+
+    store = SettingsStore()
+    store.path = tmp_path / "settings.json"
+    store.path.write_text('{"language": "it"}', encoding="utf-8")
+    assert store.load().primary_mode == DEVELOPMENT_MODE
+
+
+def test_fresh_install_keeps_primary_mode_unselected(tmp_path: Path) -> None:
+    store = SettingsStore()
+    store.path = tmp_path / "missing-settings.json"
+    assert store.load().primary_mode == ""
+
+
+def test_invalid_primary_mode_falls_back_to_development(tmp_path: Path) -> None:
+    from local_ai_bridge.core.settings import DEVELOPMENT_MODE
+
+    store = SettingsStore()
+    store.path = tmp_path / "settings.json"
+    store.path.write_text('{"primary_mode": "automatic"}', encoding="utf-8")
+    assert store.load().primary_mode == DEVELOPMENT_MODE

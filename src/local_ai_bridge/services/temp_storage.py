@@ -30,13 +30,13 @@ def configured_temp_root(configured: str | Path | None) -> Path:
     root.mkdir(parents=True, exist_ok=True)
     marker = root / MARKER_NAME
     marker.touch(exist_ok=True)
-    for name in ("exports", "imports", "patches"):
+    for name in ("exports", "imports", "patches", "ai_models"):
         (root / name).mkdir(exist_ok=True)
     return root.resolve()
 
 
 def managed_subdir(configured: str | Path | None, name: str) -> Path:
-    if name not in {"exports", "imports", "patches"}:
+    if name not in {"exports", "imports", "patches", "ai_models"}:
         raise ValueError(f"Sottocartella temporanea non consentita: {name}")
     path = configured_temp_root(configured) / name
     path.mkdir(parents=True, exist_ok=True)
@@ -123,6 +123,6 @@ def clean_managed_temp(configured: str | Path | None) -> CleanupResult:
                 directories += 1
         shutil.rmtree(child)
         directories += 1
-    for name in ("exports", "imports", "patches"):
+    for name in ("exports", "imports", "patches", "ai_models"):
         (root / name).mkdir(exist_ok=True)
     return CleanupResult(files, directories, total_bytes)

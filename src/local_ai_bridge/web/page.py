@@ -1,10 +1,24 @@
 from __future__ import annotations
 
+import hashlib
 import html
 import json
+from pathlib import Path
 
 from local_ai_bridge.web.page_assets import PAGE_SCRIPT, PAGE_STYLE
 from local_ai_bridge.core.prompt_presets import load_prompt_presets
+
+
+def _icon_path() -> Path:
+    return Path(__file__).parents[1] / "resources" / "app_icon.svg"
+
+
+def _icon_revision() -> str:
+    return hashlib.sha256(_icon_path().read_bytes()).hexdigest()[:12]
+
+
+def _icon_url() -> str:
+    return f"/favicon.svg?v={_icon_revision()}"
 
 
 def render_manifest(version: str) -> str:
@@ -17,18 +31,14 @@ def render_manifest(version: str) -> str:
             "background_color": "#0b1220",
             "theme_color": "#2563eb",
             "description": "Assistente mobile semplice per workspace BridgAI.",
-            "icons": [{"src": "/favicon.svg", "sizes": "any", "type": "image/svg+xml"}],
+            "icons": [{"src": _icon_url(), "sizes": "any", "type": "image/svg+xml"}],
         },
         ensure_ascii=False,
     )
 
 
 def render_favicon_svg() -> str:
-    return """<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
-<defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#5f89ff"/><stop offset="1" stop-color="#3157d9"/></linearGradient></defs>
-<rect width="64" height="64" rx="16" fill="url(#g)"/>
-<path d="M19 14h17c8 0 13 4 13 10 0 4-2 7-6 9 5 2 8 5 8 10 0 8-6 12-15 12H19V14zm10 9v7h7c3 0 5-1 5-4s-2-3-5-3h-7zm0 15v8h8c4 0 6-1 6-4s-2-4-6-4h-8z" fill="white"/>
-</svg>"""
+    return _icon_path().read_text(encoding="utf-8")
 
 
 def _step(number: str, title: str, description: str, body: str) -> str:
@@ -37,6 +47,66 @@ def _step(number: str, title: str, description: str, body: str) -> str:
   <div class="step-head"><span class="step-number">{number}</span><div><p class="eyebrow">Passaggio {number} di 3</p><h2>{title}</h2><p>{description}</p></div></div>
   {body}
 </section>"""
+
+
+def _power_user_settings_section() -> str:
+    return """
+<section class="card power-user-card">
+<details id="powerUserSettings" ontoggle="if(this.open)loadPowerUserSettings()">
+  <summary>Impostazioni power-user</summary>
+  <div class="details-body">
+    <p class="muted">Queste opzioni avanzate sono condivise con la versione desktop. Credenziali, 2FA, root progetti e chiavi cloud restano configurabili soltanto dal programma locale.</p>
+    <div class="power-user-grid">
+      <div class="settings-panel">
+        <h3>Contesto AI avanzato</h3>
+        <label class="switch-row" for="includeCustomPrompts"><input id="includeCustomPrompts" type="checkbox"><span class="switch-track" aria-hidden="true"></span><span>Includi le istruzioni personalizzate nel Super-Report</span></label>
+        <label for="globalPrompt">Prompt globale</label>
+        <textarea id="globalPrompt" class="settings-textarea" placeholder="Convenzioni, lingua, vincoli architetturali e preferenze valide per tutti i progetti..."></textarea>
+      </div>
+      <div class="settings-panel">
+        <h3>Formati di scambio</h3>
+        <label for="requestedFilesFormat">Formato dei file richiesti</label>
+        <select id="requestedFilesFormat"><option value="zip">ZIP — consigliato</option><option value="markdown">Markdown — per AI senza supporto ZIP</option></select>
+        <p class="field-help">Definisce cosa scarichi quando l’AI richiede file con #scarica.</p>
+        <label for="updateFormat">Formato delle modifiche proposte</label>
+        <select id="updateFormat"><option value="zip">ZIP — consigliato</option><option value="text">File Markdown di aggiornamento</option></select>
+        <p class="field-help">Il file Markdown di aggiornamento contiene operazioni CREATE, REPLACE e DELETE complete. L’automazione browser viene disabilitata quando uno dei formati non usa ZIP.</p>
+        <details class="compatibility-details" id="aiWebCompatibility">
+          <summary>Compatibilità con le AI Web</summary>
+          <div class="details-body">
+            <p class="field-help">Il formato dei file richiesti è distinto dal formato delle modifiche proposte.</p>
+            <div class="compatibility-table-wrap">
+              <table class="compatibility-table">
+                <thead><tr><th>AI Web</th><th>Formato dei file richiesti</th><th>Formato delle modifiche proposte</th></tr></thead>
+                <tbody>
+                  <tr><th scope="row">ChatGPT</th><td>ZIP o Markdown</td><td>ZIP o Markdown</td></tr>
+                  <tr><th scope="row">Claude</th><td>ZIP o Markdown</td><td>ZIP o Markdown</td></tr>
+                  <tr><th scope="row">Gemini Pro</th><td>ZIP o Markdown</td><td>Markdown</td></tr>
+                  <tr><th scope="row">Perplexity</th><td>Markdown consigliato</td><td>Markdown</td></tr>
+                  <tr><th scope="row">Microsoft Copilot</th><td>Markdown</td><td>Markdown</td></tr>
+                </tbody>
+              </table>
+            </div>
+            <p class="field-help"><strong>Markdown offre la massima compatibilità generale.</strong> Il supporto ZIP per i file richiesti non implica il supporto ZIP per le modifiche proposte.</p>
+          </div>
+        </details>
+      </div>
+    </div>
+    <div id="projectPowerUserSettings" class="settings-panel">
+      <h3>Progetto corrente</h3>
+      <p id="projectPowerUserHint" class="field-help">Prompt ed esclusioni vengono salvati nel workspace aperto.</p>
+      <label for="projectPrompt">Prompt del progetto</label>
+      <textarea id="projectPrompt" class="settings-textarea" placeholder="Istruzioni specifiche del workspace selezionato..."></textarea>
+      <label for="projectIgnore">File esclusi dal Super-Report</label>
+      <textarea id="projectIgnore" class="settings-textarea compact-settings-textarea" placeholder="Un glob per riga, ad esempio dist/, *.sqlite o docs/generated/**"></textarea>
+    </div>
+    <p class="field-help">Le modifiche vengono salvate nella configurazione condivisa. Se la finestra desktop è già aperta, riaprila o aggiornane la schermata prima di modificare nuovamente le stesse opzioni.</p>
+    <div class="actions"><button class="secondary" onclick="loadPowerUserSettings(true)">Ricarica impostazioni</button><button class="success" onclick="savePowerUserSettings()">Salva impostazioni power-user</button></div>
+    <div id="powerUserResult" class="feedback"></div>
+  </div>
+</details>
+</section>
+"""
 
 
 def render_index(
@@ -95,22 +165,31 @@ def render_index(
   <button class="secondary" onclick="pasteInto('downloadRequest','exportResult')">Incolla</button>
   <button onclick="exportFiles()">Prepara i file richiesti</button>
 </div>
+<p id="exportFormatHint" class="field-help">Formato attivo: ZIP.</p>
 <div id="exportResult" class="feedback"></div>
 """,
     )
     update_step = _step(
         "3",
         "Controlla e applica l’aggiornamento",
-        "Carica lo ZIP restituito dall’AI. Nessun file viene scritto prima della tua conferma.",
+        "Usa il formato selezionato nelle impostazioni avanzate. Nessun file viene scritto prima della tua conferma.",
         """
-<label for="zipFile">ZIP dell’aggiornamento</label>
-<input id="zipFile" type="file" accept=".zip,application/zip">
-<div class="actions"><button onclick="uploadZip()">Analizza ZIP</button></div>
-<div class="separator">oppure</div>
-<details class="compact"><summary>Hai ricevuto testo SEARCH/REPLACE?</summary><div class="details-body">
-  <textarea id="patchText" placeholder="FILE: src/...&#10;&lt;&lt;&lt;&lt;&lt;&lt;&lt; SEARCH&#10;...&#10;=======&#10;...&#10;&gt;&gt;&gt;&gt;&gt;&gt;&gt; REPLACE"></textarea>
-  <div class="actions"><button class="secondary" onclick="pasteInto('patchText','planSummary')">Incolla</button><button onclick="inspectPatch()">Analizza testo</button></div>
-</div></details>
+<div id="zipUpdateInput">
+  <label for="zipFile">ZIP dell’aggiornamento</label>
+  <input id="zipFile" type="file" accept=".zip,application/zip">
+  <div class="actions"><button onclick="uploadZip()">Analizza ZIP</button></div>
+</div>
+<div id="textUpdateInput" hidden>
+  <label for="markdownUpdateFile">File Markdown di aggiornamento</label>
+  <input id="markdownUpdateFile" type="file" accept=".md,.txt,text/markdown,text/plain">
+  <p class="field-help">Seleziona o trascina qui il file .md o .txt restituito dall’AI.</p>
+  <div class="actions"><button onclick="uploadMarkdownUpdate()">Analizza file</button></div>
+  <div class="manual-fallback">
+    <h3>Oppure incolla manualmente la risposta</h3>
+    <textarea id="patchText" placeholder="Incolla qui tutte le operazioni CREATE, REPLACE e DELETE del file Markdown di aggiornamento..."></textarea>
+    <div class="actions"><button class="secondary" onclick="pasteInto('patchText','planSummary')">Incolla</button><button onclick="inspectTextUpdate()">Analizza testo incollato</button></div>
+  </div>
+</div>
 <div id="planSummary" class="feedback"></div>
 <div id="preview" class="preview">
   <h3>Checklist pre-applicazione</h3><div id="preApplyChecklist" class="pre-apply-checklist"></div>
@@ -123,12 +202,13 @@ def render_index(
     )
     displayed_address = html.escape(connection_address or "indirizzo in rilevamento…")
     safe_version = html.escape(version)
+    icon_url = html.escape(_icon_url(), quote=True)
     script = PAGE_SCRIPT.replace("__CSRF__", json.dumps(csrf_token))
     return f"""<!doctype html>
 <html lang="it"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-<meta name="theme-color" content="#07111f"><link rel="icon" href="/favicon.svg" type="image/svg+xml"><link rel="apple-touch-icon" href="/favicon.svg"><script>(function(){{try{{var saved=localStorage.getItem('bridgai-web-theme');var system=window.matchMedia&&window.matchMedia('(prefers-color-scheme: light)').matches?'light':'dark';document.documentElement.dataset.theme=saved==='light'||saved==='dark'?saved:system}}catch(_){{document.documentElement.dataset.theme='dark'}}}})();</script><link rel="manifest" href="/manifest.webmanifest"><title>BridgAI Web {safe_version}</title><style>{PAGE_STYLE}</style></head>
+<meta name="theme-color" content="#07111f"><link rel="icon" href="{icon_url}" type="image/svg+xml"><link rel="apple-touch-icon" href="{icon_url}"><script>(function(){{try{{var saved=localStorage.getItem('bridgai-web-theme');var system=window.matchMedia&&window.matchMedia('(prefers-color-scheme: light)').matches?'light':'dark';document.documentElement.dataset.theme=saved==='light'||saved==='dark'?saved:system}}catch(_){{document.documentElement.dataset.theme='dark'}}}})();</script><link rel="manifest" href="/manifest.webmanifest"><title>BridgAI Web {safe_version}</title><style>{PAGE_STYLE}</style></head>
 <body>
-<header><div class="header-row"><div class="brand"><span class="brand-mark" aria-hidden="true">B</span><div><strong>BridgAI Web</strong><small class="connection-line">Collegati a <strong id="connectionAddress">{displayed_address}</strong></small></div></div><div class="header-meta"><label class="language-control" for="languageSelect"><span class="sr-only">Lingua</span><select id="languageSelect" onchange="changeLanguage(this.value)" aria-label="Lingua interfaccia"><option value="it">IT</option><option value="en">EN</option></select></label><button id="themeToggle" class="theme-toggle" type="button" onclick="toggleTheme()" aria-label="Passa alla modalità chiara" title="Passa alla modalità chiara"><span id="themeIcon" aria-hidden="true">☀</span></button><span id="currentProject" class="project-chip">Nessun progetto aperto</span><span id="modeBadge" class="badge">Connessione…</span></div></div></header>
+<header><div class="header-row"><div class="brand"><img class="brand-mark" src="{icon_url}" alt="" aria-hidden="true"><div><strong>BridgAI Web</strong><small class="connection-line">Collegati a <strong id="connectionAddress">{displayed_address}</strong></small></div></div><div class="header-meta"><label class="language-control" for="languageSelect"><span class="sr-only">Lingua</span><select id="languageSelect" onchange="changeLanguage(this.value)" aria-label="Lingua interfaccia"><option value="it">IT</option><option value="en">EN</option></select></label><button id="themeToggle" class="theme-toggle" type="button" onclick="toggleTheme()" aria-label="Passa alla modalità chiara" title="Passa alla modalità chiara"><span id="themeIcon" aria-hidden="true">☀</span></button><span id="currentProject" class="project-chip">Nessun progetto aperto</span><span id="modeBadge" class="badge">Connessione…</span></div></div></header>
 <div id="busy"><div>Operazione in corso…</div></div>
 <main>
 <section id="authCard" class="card"><h2>Accesso</h2><p class="muted">Inserisci le credenziali configurate in BridgAI.</p><div class="grid"><div><label for="authUsername">Username</label><input id="authUsername" autocomplete="username"></div><div><label for="authPassword">Password</label><div class="password-field"><input id="authPassword" type="password" autocomplete="current-password"><button id="passwordVisibilityToggle" class="password-toggle" type="button" onclick="togglePasswordVisibility()" aria-label="Mostra password" title="Mostra password" aria-pressed="false"><svg class="password-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path class="password-icon-show" d="M12 5c5.2 0 9.3 4.1 10.5 6.3a1.4 1.4 0 0 1 0 1.4C21.3 14.9 17.2 19 12 19S2.7 14.9 1.5 12.7a1.4 1.4 0 0 1 0-1.4C2.7 9.1 6.8 5 12 5Zm0 2C8.2 7 5 9.8 3.5 12 5 14.2 8.2 17 12 17s7-2.8 8.5-5C19 9.8 15.8 7 12 7Zm0 2.2A2.8 2.8 0 1 1 12 14.8a2.8 2.8 0 0 1 0-5.6Z"/><path class="password-icon-hide" d="m3.3 2 18.7 18.7-1.3 1.3-3.1-3.1A12.7 12.7 0 0 1 12 20C6.8 20 2.7 15.9 1.5 13.7a1.4 1.4 0 0 1 0-1.4 16 16 0 0 1 4.1-4.8L2 3.3 3.3 2Zm3.8 7A13.8 13.8 0 0 0 3.5 13c1.5 2.2 4.7 5 8.5 5 1.4 0 2.7-.4 3.9-1l-2-2a3 3 0 0 1-3.9-3.9L7.1 9Zm4.8-4c5.2 0 9.3 4.1 10.5 6.3a1.4 1.4 0 0 1 0 1.4 15.5 15.5 0 0 1-2.3 3.1l-1.4-1.4a13 13 0 0 0 1.8-2.4c-1.5-2.2-4.7-5-8.5-5-.7 0-1.4.1-2 .3L8.4 5.7c1.1-.4 2.3-.7 3.5-.7Z"/></svg><span id="passwordVisibilityLabel" class="sr-only">Mostra password</span></button></div></div><div id="secondFactorField"><label for="authSecondFactor">Codice 2FA</label><input id="authSecondFactor" inputmode="numeric" autocomplete="one-time-code" placeholder="123456"></div></div><p id="twoFactorHint" class="muted"></p><label class="switch-row" for="rememberCredentials"><input id="rememberCredentials" type="checkbox"><span class="switch-track" aria-hidden="true"></span><span>Ricorda l’accesso su questo browser</span></label><p class="muted">La password e il codice 2FA non vengono conservati. Se attivi questa opzione viene memorizzato soltanto un token di sessione revocabile, valido per un tempo limitato. Per Internet usa sempre HTTPS.</p><div class="actions"><button onclick="login()">Accedi</button><button class="secondary" onclick="logout()">Disconnetti</button></div><div id="authResult" class="feedback"></div></section>
@@ -140,4 +220,5 @@ def render_index(
 {task_step}{export_step}{update_step}
 <section class="card github-simple-card"><div class="step-head"><span class="step-number">G</span><div><p class="eyebrow">Pubblicazione semplice</p><h2>GitHub in un clic</h2><p>Al primo utilizzo crea il repository; dopo, pubblica automaticamente gli aggiornamenti.</p></div></div><div class="status-strip"><div><span class="muted">Stato GitHub</span><div id="githubSimpleStatus" class="project-name">Controllo in corso…</div></div></div><div class="grid"><div><label id="githubRepoLabel" for="githubRepoName">Nome nuova repository GitHub</label><input id="githubRepoName" placeholder="nome-nuova-repository"><p id="githubRepoHelp" class="field-help">Verrà usato solo per creare la repository del progetto corrente.</p></div><div><label for="githubVisibility">Visibilità della nuova repository</label><select id="githubVisibility"><option value="private">Privato</option><option value="public">Pubblico</option></select></div></div><div class="actions"><button id="githubSimpleButton" class="success" onclick="simpleGithubAction()">Crea repository e pubblica</button><button id="githubOpenButton" class="secondary" onclick="openGithubRepository()" disabled>Apri repository</button></div><div id="githubSimpleResult" class="feedback"></div></section>
 <section class="card advanced-card"><details id="verificationTools"><summary>Verifica e strumenti avanzati</summary><div class="details-body"><p class="muted">Usa questi comandi dopo l’applicazione o per la manutenzione del progetto. I test non annullano automaticamente l’aggiornamento: BridgAI distingue una verifica parziale da un errore strutturale e mostra sempre i dettagli.</p><div class="actions"><button class="success" onclick="runTests()">Esegui test</button><button class="secondary" onclick="runTool('/api/git/status','Git status completato')">Git status</button><button class="secondary" onclick="runTool('/api/git/diff','Git diff completato')">Git diff</button><button class="danger" onclick="rollback()">Rollback ultimo batch</button><button class="danger" onclick="restartProgram()">Riavvia BridgAI</button></div><div id="toolResult" class="feedback"></div></div></details></section>
+{_power_user_settings_section()}
 </div></main><script>{script}</script></body></html>"""

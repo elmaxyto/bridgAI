@@ -4,10 +4,11 @@ import json
 import threading
 import urllib.error
 import urllib.request
+import urllib.parse
 from pathlib import Path
 
 from local_ai_bridge.web.server import BridgeHTTPServer, BridgeState
-from local_ai_bridge.web.page import render_index
+from local_ai_bridge.web.page import render_index, render_manifest
 from local_ai_bridge.core.models import ChangePlan, FileChange
 from local_ai_bridge.services.pre_apply import build_pre_apply_summary
 
@@ -18,6 +19,29 @@ def _request(url: str, method: str = "GET", payload: dict | None = None, csrf: s
     if csrf:
         headers["X-Local-Bridge-CSRF"] = csrf
     request = urllib.request.Request(url, data=data, method=method, headers=headers)
+    try:
+        with urllib.request.urlopen(request, timeout=5) as response:
+            return response.status, json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        return exc.code, json.loads(exc.read().decode("utf-8"))
+
+
+def _upload_file(
+    url: str,
+    filename: str,
+    data: bytes,
+    csrf: str,
+) -> tuple[int, dict]:
+    request = urllib.request.Request(
+        url,
+        data=data,
+        method="POST",
+        headers={
+            "Content-Type": "application/octet-stream",
+            "X-File-Name": urllib.parse.quote(filename),
+            "X-Local-Bridge-CSRF": csrf,
+        },
+    )
     try:
         with urllib.request.urlopen(request, timeout=5) as response:
             return response.status, json.loads(response.read().decode("utf-8"))
@@ -132,6 +156,16 @@ def test_web_page_uses_guided_simple_workflow() -> None:
     assert "Continua su Gemini" in page
     assert "Prepara i file richiesti" in page
     assert "Applica aggiornamento" in page
+    assert 'id="zipUpdateInput"' in page
+    assert 'id="textUpdateInput" hidden' in page
+    assert 'id="markdownUpdateFile"' in page
+    assert 'accept=".md,.txt,text/markdown,text/plain"' in page
+    assert "Analizza file" in page
+    assert "Oppure incolla manualmente la risposta" in page
+    assert 'id="patchText"' in page
+    assert "Analizza testo incollato" in page
+    assert "uploadMarkdownUpdate()" in page
+    assert "SEARCH/REPLACE" not in page
     assert 'id="verificationTools"' in page
     assert "Verifica e strumenti avanzati" in page
     assert "5. Verifica" not in page
@@ -246,7 +280,9 @@ def test_web_page_interprets_partial_test_results() -> None:
 def test_web_page_exposes_favicon_language_and_dictation_controls() -> None:
     page = render_index("csrf", "1.0.0")
 
-    assert 'rel="icon" href="/favicon.svg"' in page
+    assert 'rel="icon" href="/favicon.svg?v=' in page
+    assert '<img class="brand-mark" src="/favicon.svg?v=' in page
+    assert page.count('/favicon.svg?v=') == 3
     assert 'id="languageSelect"' in page
     assert 'changeLanguage(this.value)' in page
     assert 'bridgai-web-language' in page
@@ -265,6 +301,24 @@ def test_web_page_exposes_favicon_language_and_dictation_controls() -> None:
     assert "border-radius:50%" in page
 
 
+def test_web_icon_urls_change_with_the_official_icon_content(monkeypatch, tmp_path: Path) -> None:
+    icon = tmp_path / "app_icon.svg"
+    icon.write_text("<svg>first</svg>", encoding="utf-8")
+    monkeypatch.setattr("local_ai_bridge.web.page._icon_path", lambda: icon)
+
+    first_page = render_index("csrf", "1.0.0")
+    first_manifest = json.loads(render_manifest("1.0.0"))
+
+    icon.write_text("<svg>second</svg>", encoding="utf-8")
+    second_page = render_index("csrf", "1.0.0")
+    second_manifest = json.loads(render_manifest("1.0.0"))
+
+    assert first_page != second_page
+    assert first_manifest["icons"][0]["src"] != second_manifest["icons"][0]["src"]
+    assert first_manifest["icons"][0]["src"] in first_page
+    assert second_manifest["icons"][0]["src"] in second_page
+
+
 def test_web_server_serves_svg_favicon(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
     state = BridgeState()
@@ -276,8 +330,15 @@ def test_web_server_serves_svg_favicon(tmp_path: Path, monkeypatch) -> None:
         with urllib.request.urlopen(base + "/favicon.svg", timeout=5) as response:
             body = response.read().decode("utf-8")
             assert response.headers.get_content_type() == "image/svg+xml"
-        assert body.startswith("<svg")
-        assert "linearGradient" in body
+        expected = (
+            Path(__file__).parents[1]
+            / "src"
+            / "local_ai_bridge"
+            / "resources"
+            / "app_icon.svg"
+        ).read_text(encoding="utf-8")
+        assert body == expected
+        assert "data:image/png;base64," in body
     finally:
         server.shutdown()
         server.server_close()
@@ -317,3 +378,334 @@ def test_web_page_exposes_remote_browser_automation_controls() -> None:
     assert "/api/browser-automation/status" in page
     assert "window.location.origin" in page
     assert "Per collegare un browser remoto" in page
+
+
+def test_web_page_exposes_power_user_settings_without_sensitive_fields() -> None:
+    page = render_index("csrf", "1.0.0")
+
+    assert 'id="powerUserSettings"' in page
+    assert page.index('id="powerUserSettings"') > page.index('id="verificationTools"')
+    assert 'id="includeCustomPrompts"' in page
+    assert 'id="globalPrompt"' in page
+    assert 'id="projectPrompt"' in page
+    assert 'id="projectIgnore"' in page
+    assert 'id="requestedFilesFormat"' in page
+    assert 'id="updateFormat"' in page
+    assert 'id="textualFileOperationsMode"' not in page
+    assert "/api/power-user/settings" in page
+    assert "Credenziali, 2FA, root progetti e chiavi cloud" in page
+    assert "Power-user settings" in page
+    assert "Open a project to edit project-specific prompts and exclusions." in page
+    assert 'id="aiAssistantCloudKey"' not in page
+    assert 'id="webTotpSecret"' not in page
+    assert "BEGIN_FILE / OPERATION / PATH / CONTENT / END_FILE" not in page
+
+
+def test_web_power_user_settings_round_trip(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    state = BridgeState()
+    state.settings.gemini_drive_enabled = True
+    state.settings.markdown_exchange_mode = True
+    state.settings.web_port = 9876
+    state.settings_store.save(state.settings)
+    server = BridgeHTTPServer(("127.0.0.1", 0), state)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base = f"http://127.0.0.1:{server.server_address[1]}"
+    try:
+        status, _ = _request(
+            base + "/api/workspace",
+            "POST",
+            {"path": str(workspace)},
+            state.csrf_token,
+        )
+        assert status == 200
+
+        status, payload = _request(base + "/api/power-user/settings")
+        assert status == 200
+        assert payload["project_available"] is True
+        assert payload["workspace"] == str(workspace.resolve())
+
+        status, payload = _request(
+            base + "/api/power-user/settings",
+            "POST",
+            {
+                "include_custom_prompts": False,
+                "global_prompt": "Usa sempre type hints.",
+                "markdown_exchange_mode": True,
+                "textual_file_operations_mode": True,
+                "project_prompt": "Mantieni compatibilità Python 3.11.",
+                "project_ignore": "dist/\n*.sqlite\n",
+                "confirm": "SAVE_POWER_USER_SETTINGS",
+            },
+            state.csrf_token,
+        )
+        assert status == 200
+        assert payload["message"] == "Impostazioni power-user salvate."
+        assert payload["include_custom_prompts"] is False
+        assert payload["markdown_exchange_mode"] is True
+        assert payload["textual_file_operations_mode"] is True
+        assert payload["project_prompt"] == "Mantieni compatibilità Python 3.11."
+        assert payload["project_ignore"] == "dist/\n*.sqlite\n"
+        assert state.settings.global_prompt == "Usa sempre type hints."
+        assert state.settings.gemini_drive_enabled is True
+        assert state.settings.markdown_exchange_mode is True
+        assert state.settings.web_port == 9876
+
+        status, persisted = _request(base + "/api/power-user/settings")
+        assert status == 200
+        assert persisted["global_prompt"] == "Usa sempre type hints."
+        assert persisted["project_prompt"] == "Mantieni compatibilità Python 3.11."
+        assert persisted["project_ignore"] == "dist/\n*.sqlite\n"
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+def test_web_power_user_settings_require_confirmation(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+    state = BridgeState()
+    server = BridgeHTTPServer(("127.0.0.1", 0), state)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base = f"http://127.0.0.1:{server.server_address[1]}"
+    try:
+        status, payload = _request(
+            base + "/api/power-user/settings",
+            "POST",
+            {
+                "include_custom_prompts": False,
+                "global_prompt": "not saved",
+                "markdown_exchange_mode": False,
+                "textual_file_operations_mode": False,
+                "project_prompt": "",
+                "project_ignore": "",
+            },
+            state.csrf_token,
+        )
+        assert status == 400
+        assert "Conferma" in payload["error"]
+        assert state.settings.global_prompt == ""
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+def test_web_report_cannot_toggle_advanced_text_file_mode(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    state = BridgeState()
+    server = BridgeHTTPServer(("127.0.0.1", 0), state)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base = f"http://127.0.0.1:{server.server_address[1]}"
+    try:
+        status, _payload = _request(
+            base + "/api/workspace",
+            "POST",
+            {"path": str(workspace)},
+            state.csrf_token,
+        )
+        assert status == 200
+
+        status, payload = _request(
+            base + "/api/report",
+            "POST",
+            {"task": "Crea un file", "textual_file_operations_mode": True},
+            state.csrf_token,
+        )
+        assert status == 200
+        assert "**FORMATO MODIFICHE — File Markdown di aggiornamento**" not in payload["report"]
+
+        status, payload = _request(base + "/api/status")
+        assert status == 200
+        assert payload["textual_file_operations_mode"] is False
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+def test_web_text_file_operations_mode_generates_and_inspects(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "obsolete.txt").write_text("old\n", encoding="utf-8")
+    state = BridgeState()
+    state.settings.textual_file_operations_mode = True
+    state.settings_store.save(state.settings)
+    server = BridgeHTTPServer(("127.0.0.1", 0), state)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base = f"http://127.0.0.1:{server.server_address[1]}"
+    try:
+        status, payload = _request(
+            base + "/api/workspace",
+            "POST",
+            {"path": str(workspace)},
+            state.csrf_token,
+        )
+        assert status == 200
+
+        status, payload = _request(
+            base + "/api/report",
+            "POST",
+            {"task": "Crea un file ed elimina quello obsoleto"},
+            state.csrf_token,
+        )
+        assert status == 200
+        assert "**FORMATO MODIFICHE — File Markdown di aggiornamento**" in payload["report"]
+
+        status, payload = _request(base + "/api/status")
+        assert status == 200
+        assert payload["textual_file_operations_mode"] is True
+
+        response = '''
+BEGIN_FILE
+OPERATION: CREATE
+PATH: created.txt
+FINAL_NEWLINE: YES
+CONTENT:
+```text
+created
+```
+END_FILE
+BEGIN_FILE
+OPERATION: DELETE
+PATH: obsolete.txt
+END_FILE
+'''
+        status, payload = _request(
+            base + "/api/patch/inspect",
+            "POST",
+            {"text": response},
+            state.csrf_token,
+        )
+        assert status == 200
+        assert [item["kind"] for item in payload["changes"]] == ["create", "delete"]
+
+        wrapped_response = '''Ecco il risultato:
+```text
+**BEGIN_FILE**
+**OPERATION: CREA**
+**PATH: `wrapped.txt`**
+CONTENT:
+~~~text
+wrapped
+~~~~
+**END_FILE**
+```
+'''
+        status, payload = _request(
+            base + "/api/patch/inspect",
+            "POST",
+            {"text": wrapped_response},
+            state.csrf_token,
+        )
+        assert status == 200
+        assert [item["kind"] for item in payload["changes"]] == ["create"]
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+def test_web_markdown_update_upload_matches_pasted_text_and_validates_files(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    state = BridgeState()
+    state.settings.textual_file_operations_mode = True
+    state.settings_store.save(state.settings)
+    server = BridgeHTTPServer(("127.0.0.1", 0), state)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base = f"http://127.0.0.1:{server.server_address[1]}"
+    update = """BEGIN_FILE
+OPERATION: CREATE
+PATH: created.txt
+FINAL_NEWLINE: YES
+CONTENT:
+```text
+created
+```
+END_FILE
+"""
+    try:
+        status, _payload = _request(
+            base + "/api/workspace",
+            "POST",
+            {"path": str(workspace)},
+            state.csrf_token,
+        )
+        assert status == 200
+
+        status, pasted = _request(
+            base + "/api/patch/inspect",
+            "POST",
+            {"text": update},
+            state.csrf_token,
+        )
+        assert status == 200
+
+        status, uploaded_md = _upload_file(
+            base + "/api/markdown/upload",
+            "bridgai-update.md",
+            update.encode("utf-8"),
+            state.csrf_token,
+        )
+        assert status == 200
+        assert uploaded_md["changes"] == pasted["changes"]
+        assert uploaded_md["diff"] == pasted["diff"]
+
+        status, uploaded_txt = _upload_file(
+            base + "/api/markdown/upload",
+            "bridgai-update.txt",
+            update.encode("utf-8"),
+            state.csrf_token,
+        )
+        assert status == 200
+        assert uploaded_txt["changes"] == pasted["changes"]
+
+        status, payload = _upload_file(
+            base + "/api/markdown/upload",
+            "empty.md",
+            b"",
+            state.csrf_token,
+        )
+        assert status == 400
+        assert "vuoto" in payload["error"].lower()
+
+        status, payload = _upload_file(
+            base + "/api/markdown/upload",
+            "invalid.txt",
+            b"\xff\xfe\x00",
+            state.csrf_token,
+        )
+        assert status == 400
+        assert "UTF-8" in payload["error"]
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+def test_web_power_user_settings_expose_ai_compatibility_table() -> None:
+    page = render_index("csrf", "1.0.0")
+
+    assert 'id="aiWebCompatibility"' in page
+    assert '<summary>Compatibilità con le AI Web</summary>' in page
+    assert 'class="compatibility-table"' in page
+    assert '<th scope="row">Gemini Pro</th><td>ZIP o Markdown</td><td>Markdown</td>' in page
+    assert '<th scope="row">Perplexity</th><td>Markdown consigliato</td><td>Markdown</td>' in page
+    assert '<th scope="row">Microsoft Copilot</th><td>Markdown</td><td>Markdown</td>' in page
+    assert 'Markdown offre la massima compatibilità generale.' in page
+    assert '.compatibility-table-wrap' in page

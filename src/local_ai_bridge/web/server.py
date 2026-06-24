@@ -8,8 +8,6 @@ import threading
 import time
 import urllib.parse
 import webbrowser
-from dataclasses import asdict
-from datetime import datetime
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from importlib.metadata import PackageNotFoundError, version
@@ -17,7 +15,6 @@ from pathlib import Path
 from typing import Any
 
 from local_ai_bridge.services.git import GitIntegrationError
-from local_ai_bridge.services.pre_apply import build_pre_apply_summary
 from local_ai_bridge.web.browser_automation import dispatch_browser_automation_action
 from local_ai_bridge.web.extension_api import (
     ExtensionResult,
@@ -27,6 +24,10 @@ from local_ai_bridge.web.extension_api import (
 )
 from local_ai_bridge.web.network import connection_status_payload
 from local_ai_bridge.web.page import render_favicon_svg, render_index, render_manifest
+from local_ai_bridge.web.power_user_settings import (
+    power_user_settings_payload,
+    update_power_user_settings,
+)
 from local_ai_bridge.web.project_actions import (
     dispatch_project_action,
     project_status_payload,
@@ -62,17 +63,12 @@ def _safe_upload_name(value: str | None) -> str:
     return name
 
 
-def _plan_payload(state: BridgeState, plan_id: str) -> dict[str, Any]:
-    plan = state.get_plan(plan_id)
-    return {
-        "plan_id": plan_id,
-        "plan_type": plan.plan_type,
-        "changes": [asdict(change) for change in plan.changes],
-        "warnings": plan.warnings,
-        "diff": plan.diff,
-        "commit_message": plan.metadata.get("commit_message"),
-        "pre_apply": build_pre_apply_summary(plan),
-    }
+def _safe_markdown_upload_name(value: str | None) -> str:
+    raw = urllib.parse.unquote(value or "bridgai-update.md")
+    name = Path(raw).name.replace("\x00", "").strip() or "bridgai-update.md"
+    if Path(name).suffix.casefold() not in {".md", ".txt"}:
+        raise ValueError("È possibile caricare soltanto file .md o .txt.")
+    return name
 
 
 class BridgeHandler(BaseHTTPRequestHandler):
@@ -159,7 +155,6 @@ class BridgeHandler(BaseHTTPRequestHandler):
         return value
 
     def _require_api_access(self, *, write: bool = False) -> None:
-        security = self.server.state.security
         if not self.server.state.accepts_api_authorization(
             self.headers.get("Authorization"), self._client_ip()
         ):
@@ -191,8 +186,6 @@ class BridgeHandler(BaseHTTPRequestHandler):
             direct_is_loopback
             and forwarded_proto.rsplit(",", 1)[-1].strip().lower() == "https"
         )
-        # A reverse proxy may omit X-Forwarded-For while still terminating TLS.
-        # In that case do not accidentally classify its public request as local.
         extension_client_ip = client_ip
         if proxy_reports_https and is_loopback_address(client_ip):
             extension_client_ip = "reverse-proxy-client"
@@ -275,9 +268,21 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 return
 
             self._require_api_access()
+            if parsed.path == "/api/power-user/settings":
+                self._json(
+                    HTTPStatus.OK,
+                    power_user_settings_payload(self.server.state),
+                )
+                return
             if parsed.path == "/api/status":
                 payload = project_status_payload(self.server.state, APPLICATION_VERSION)
                 payload.update(self.server.state.auth_info(self._client_ip()))
+                payload["markdown_exchange_mode"] = bool(
+                    self.server.state.settings.markdown_exchange_mode
+                )
+                payload["textual_file_operations_mode"] = bool(
+                    self.server.state.settings.textual_file_operations_mode
+                )
                 payload.update(
                     connection_status_payload(
                         bind_host=str(self.server.server_address[0]),
@@ -355,6 +360,8 @@ class BridgeHandler(BaseHTTPRequestHandler):
             self._require_api_access(write=True)
             if parsed_path == "/api/zip/upload":
                 payload = self._upload_zip()
+            elif parsed_path == "/api/markdown/upload":
+                payload = self._upload_markdown_update()
             else:
                 payload = self._dispatch(parsed_path, self._read_json())
             self._json(HTTPStatus.OK, payload)
@@ -398,6 +405,36 @@ class BridgeHandler(BaseHTTPRequestHandler):
             target.unlink(missing_ok=True)
             raise
         plan_id = state.register_plan(plan)
+        from local_ai_bridge.web.bridge_actions import _plan_payload
+        return _plan_payload(state, plan_id)
+
+    def _upload_markdown_update(self) -> dict[str, Any]:
+        state = self.server.state
+        workspace = state.require_workspace()
+        if not state.settings.textual_file_operations_mode:
+            raise ValueError(
+                "Il formato aggiornamenti attivo è ZIP. Seleziona File Markdown nelle impostazioni."
+            )
+        _safe_markdown_upload_name(self.headers.get("X-File-Name"))
+        raw = self._read_body(MAX_UPLOAD_BYTES)
+        if not raw:
+            raise ValueError("Il file Markdown di aggiornamento è vuoto.")
+        try:
+            text = raw.decode("utf-8-sig")
+        except UnicodeDecodeError as exc:
+            raise ValueError(
+                "Il file Markdown di aggiornamento non è codificato in UTF-8."
+            ) from exc
+        if not text.strip():
+            raise ValueError("Il file Markdown di aggiornamento è vuoto.")
+
+        from local_ai_bridge.services.text_file_operations import (
+            inspect_text_file_operations,
+        )
+
+        plan = inspect_text_file_operations(workspace, text)
+        plan_id = state.register_plan(plan)
+        from local_ai_bridge.web.bridge_actions import _plan_payload
         return _plan_payload(state, plan_id)
 
     def _dispatch(self, path: str, body: dict[str, Any]) -> dict[str, Any]:
@@ -428,94 +465,14 @@ class BridgeHandler(BaseHTTPRequestHandler):
         if automation_payload is not None:
             return automation_payload
 
-        workspace = state.require_workspace()
-        if path == "/api/report":
-            from local_ai_bridge.core.prompt_presets import compose_task_with_preset
-            from local_ai_bridge.services.reporting import build_super_report
+        if path == "/api/power-user/settings":
+            return update_power_user_settings(state, body)
 
-            task = compose_task_with_preset(
-                str(body.get("task", "")),
-                str(body.get("preset_id", "")),
-            )
-            return {"report": build_super_report(workspace, task)}
-        if path == "/api/export":
-            from local_ai_bridge.services.exporting import create_export_zip, parse_download_requests
-            from local_ai_bridge.services.temp_storage import managed_subdir
+        from local_ai_bridge.web.bridge_actions import dispatch_bridge_action
+        payload = dispatch_bridge_action(state, path, body, self._client_ip())
+        if payload is not None:
+            return payload
 
-            requested = parse_download_requests(str(body.get("text", "")))
-            exports = managed_subdir(state.settings.temp_directory, "exports")
-            stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            created = create_export_zip(workspace, requested, exports / f"ai_context_{stamp}.zip")
-            artifact = state.register_artifact(created, content_type="application/zip")
-            return {
-                "artifact_id": artifact.artifact_id,
-                "filename": artifact.filename,
-                "files": requested,
-            }
-        if path == "/api/patch/inspect":
-            from local_ai_bridge.services.patching import inspect_gemini_response
-
-            plan = inspect_gemini_response(workspace, str(body.get("text", "")))
-            plan_id = state.register_plan(plan)
-            return _plan_payload(state, plan_id)
-        if path == "/api/zip/inspect":
-            from local_ai_bridge.services.archive import inspect_zip
-            from local_ai_bridge.services.temp_storage import stage_import_zip
-
-            if state.security.remote_mode or not is_loopback_address(self._client_ip()):
-                raise ValueError("Da remoto carica lo ZIP dal dispositivo invece di indicare un percorso server.")
-            staged = stage_import_zip(Path(str(body.get("path", ""))), state.settings.temp_directory)
-            plan_id = state.register_plan(inspect_zip(workspace, staged))
-            return _plan_payload(state, plan_id)
-        if path in {"/api/plan/apply", "/api/zip/apply"}:
-            if body.get("confirm") != "APPLY":
-                raise ValueError("Conferma di applicazione mancante.")
-            plan_id = str(body.get("plan_id", ""))
-            plan = state.get_plan(plan_id)
-            record = state.apply_service.apply(plan)
-            state.clear_plan(plan_id)
-            return {"session": record.to_dict()}
-        if path == "/api/rollback":
-            if body.get("confirm") != "ROLLBACK":
-                raise ValueError("Conferma di rollback mancante.")
-            record = state.apply_service.rollback_latest(workspace)
-            return {"session": record.to_dict()}
-        if path == "/api/github/simple/status":
-            from local_ai_bridge.services.github import simple_github_status
-
-            return simple_github_status(workspace)
-        if path == "/api/github/simple/publish":
-            if body.get("confirm") != "PUBLISH":
-                raise ValueError("Conferma di pubblicazione mancante.")
-            from local_ai_bridge.services.github import publish_or_update_github
-
-            return publish_or_update_github(
-                workspace,
-                repository_name=str(body.get("repository_name", "")).strip() or workspace.name,
-                visibility=str(body.get("visibility", "private")),
-                session_manager=state.sessions,
-            )
-        if path == "/api/tests":
-            from local_ai_bridge.services.testing import (
-                format_test_results,
-                interpret_test_results,
-                run_detected_tests,
-            )
-
-            results = run_detected_tests(workspace)
-            return {
-                "output": format_test_results(results),
-                "results": [asdict(item) for item in results],
-                "interpretation": interpret_test_results(results),
-            }
-        if path == "/api/git/status":
-            from local_ai_bridge.services.git import git_status
-
-            return {"output": git_status(workspace)}
-        if path == "/api/git/diff":
-            from local_ai_bridge.services.git import git_diff
-
-            return {"output": git_diff(workspace)}
         raise ValueError("Endpoint non supportato.")
 
 

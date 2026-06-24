@@ -52,6 +52,23 @@ def _update_zip() -> bytes:
     return stream.getvalue()
 
 
+def _operational_result_zip(mission_id: str) -> bytes:
+    stream = io.BytesIO()
+    with zipfile.ZipFile(stream, "w", zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("RISULTATO.md", "Work completed.")
+        archive.writestr(
+            "manifest.json",
+            json.dumps(
+                {
+                    "schema": "bridgai-operational-result-v1",
+                    "mission_id": mission_id,
+                }
+            ),
+        )
+        archive.writestr("output/report.txt", "completed")
+    return stream.getvalue()
+
+
 def test_extension_api_requires_local_token_and_supports_full_exchange(
     tmp_path: Path,
     monkeypatch,
@@ -439,6 +456,104 @@ def test_extension_api_records_automation_errors(
         )
         assert status == 200
         assert payload["request_status"] == "ChatGPT did not accept the attachment"
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+def test_extension_api_delivers_initial_operational_zip_and_registers_results(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    from local_ai_bridge.services.browser_extension import queue_operational_request
+    from local_ai_bridge.services.operational_missions import (
+        CATEGORY_WRITING,
+        PROCEDURE_WEB_MISSION,
+        OperationalMissionStore,
+    )
+    from local_ai_bridge.services.operational_web import build_operational_mission_package
+
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+    input_file = tmp_path / "input.txt"
+    input_file.write_text("source", encoding="utf-8")
+    output = tmp_path / "results"
+    output.mkdir()
+    mission_store = OperationalMissionStore()
+    mission = mission_store.create(
+        title="Write report",
+        original_request="Create a short report.",
+        procedure_id=PROCEDURE_WEB_MISSION,
+        work_category=CATEGORY_WRITING,
+        input_paths=[input_file],
+        output_directory=output,
+    )
+    package = build_operational_mission_package(mission)
+    token = "operational-extension-token-with-at-least-thirty-two-chars"
+    settings_store = SettingsStore()
+    settings_store.save(
+        AppSettings(
+            browser_extension_enabled=True,
+            browser_extension_token=token,
+            browser_extension_auto_download=True,
+            update_zip_directory=str(tmp_path / "downloads"),
+        )
+    )
+    queued = queue_operational_request(
+        package.path.parent,
+        package.prompt,
+        mission_id=mission.mission_id,
+        context_zip=package.path,
+    )
+
+    state = BridgeState(initial_workspace=package.path.parent)
+    server = BridgeHTTPServer(("127.0.0.1", 0), state)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base = f"http://127.0.0.1:{server.server_address[1]}"
+    try:
+        status, payload, _headers = _request(base + "/api/extension/next", token=token)
+        assert status == 200
+        request = payload["request"]
+        assert request["request_id"] == queued["request_id"]
+        assert request["request_kind"] == "operational"
+        assert request["initial_attachment"] is True
+        assert request["artifact_url"].startswith("/api/extension/artifacts/")
+
+        status, artifact, _headers = _request(base + request["artifact_url"], token=token)
+        assert status == 200
+        with zipfile.ZipFile(io.BytesIO(artifact)) as archive:
+            assert "ISTRUZIONI.md" in archive.namelist()
+            assert "manifest.json" in archive.namelist()
+
+        status, payload, _headers = _request(
+            base + "/api/extension/response",
+            method="POST",
+            token=token,
+            payload={
+                "request_id": queued["request_id"],
+                "text": "The result ZIP is ready.",
+            },
+        )
+        assert status == 200
+        assert payload["action"] == "wait_for_zip"
+        assert payload["mission_id"] == mission.mission_id
+
+        status, payload, _headers = _request(
+            base + "/api/extension/zip",
+            method="POST",
+            token=token,
+            data=_operational_result_zip(mission.mission_id),
+            headers={
+                "Content-Type": "application/zip",
+                "X-File-Name": "bridgai-results.zip",
+                "X-BridgAI-Request-ID": queued["request_id"],
+            },
+        )
+        assert status == 200
+        assert payload["action"] == "result_ready"
+        assert payload["mission_id"] == mission.mission_id
+        assert payload["preview"]["output_files"] == ["report.txt"]
     finally:
         server.shutdown()
         server.server_close()

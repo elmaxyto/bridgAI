@@ -3,6 +3,7 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
+from local_ai_bridge.services.commit_history import commit_history_text
 from local_ai_bridge.services.project_scanner_policy import (
     directory_exclusion_reason,
     file_exclusion_reason,
@@ -38,15 +39,18 @@ def compact_git_status(root: Path, output: str) -> str:
     ignore = load_project_ignore(root)
     visible: list[str] = []
     omitted: dict[str, int] = {}
+
     for line in lines:
         relative = _status_relative_path(line)
         if relative is None:
             visible.append(line)
             continue
+
         reason = _git_path_exclusion_reason(root, relative, ignore)
         if reason:
             omitted[reason] = omitted.get(reason, 0) + 1
             continue
+
         visible.append(line)
 
     if omitted:
@@ -55,24 +59,31 @@ def compact_git_status(root: Path, output: str) -> str:
             f"{reason}: {count}" for reason, count in sorted(omitted.items())
         )
         visible.append(
-            f"... {total} modifiche in percorsi tecnici omesse dal dettaglio ({detail})."
+            f"... {total} modifiche in percorsi tecnici omesse dal dettaglio "
+            f"({detail})."
         )
+
     return "\n".join(visible) or "Working tree pulita."
 
 
 def git_snapshot(root: Path) -> str:
     if not (root / ".git").exists():
         return "Repository Git non rilevato."
+
     try:
         result = subprocess.run(
             ["git", "status", "--short", "--branch"],
             cwd=root,
             capture_output=True,
             text=True,
+            errors="replace",
             timeout=10,
             check=False,
         )
         output = (result.stdout + result.stderr).strip()
-        return compact_git_status(root, output)
+        status = compact_git_status(root, output)
     except Exception as exc:
-        return f"Git status non disponibile: {exc}"
+        status = f"Git status non disponibile: {exc}"
+
+    history = commit_history_text(root)
+    return f"{status}\n\n--- Changelog dai commit ---\n{history}"

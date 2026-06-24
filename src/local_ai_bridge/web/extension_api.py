@@ -16,11 +16,16 @@ from local_ai_bridge.services.browser_extension import (
     mark_extension_seen,
     mark_error,
     mark_update_ready,
+    mark_waiting_result,
     mark_waiting_update,
     record_response,
 )
 from local_ai_bridge.services.pre_apply import build_pre_apply_summary
 from local_ai_bridge.web.extension_downloads import configure_download_directory
+from local_ai_bridge.web.extension_operational import (
+    prepare_initial_operational_attachment,
+    register_operational_result,
+)
 from local_ai_bridge.web.security import is_loopback_address
 
 
@@ -92,6 +97,8 @@ def dispatch_get(
         if request is not None:
             request["auto_export"] = settings.browser_extension_auto_export
             request["auto_download"] = settings.browser_extension_auto_download
+            if request.get("request_kind") == "operational":
+                prepare_initial_operational_attachment(state, request)
         return ExtensionResult("json", {"request": request})
     prefix = "/api/extension/artifacts/"
     if path.startswith(prefix):
@@ -188,7 +195,14 @@ def _handle_response(
     request_id = str(body.get("request_id", "")).strip()
     text = str(body.get("text", ""))
     record_response(request_id, text)
-    _request, workspace = _request_workspace(request_id)
+    request, workspace = _request_workspace(request_id)
+    if request.get("request_kind") == "operational":
+        mark_waiting_result(request_id)
+        return {
+            "action": "wait_for_zip" if settings.browser_extension_auto_download else "manual",
+            "files": [],
+            "mission_id": str(request.get("mission_id", "")),
+        }
     requested = parse_download_requests(text)
     if requested and settings.browser_extension_auto_export:
         exports = managed_subdir(settings.temp_directory, "exports")
@@ -260,6 +274,17 @@ def _register_update_path(
     *,
     delete_on_error: bool = False,
 ) -> dict[str, Any]:
+    request = current_request(request_id)
+    if request is None:
+        raise ValueError("Richiesta dell’estensione non trovata.")
+    if request.get("request_kind") == "operational":
+        return register_operational_result(
+            request_id,
+            request,
+            target,
+            delete_on_error=delete_on_error,
+        )
+
     from local_ai_bridge.services.archive import inspect_zip
 
     try:
@@ -323,17 +348,28 @@ def _handle_download_complete(
         raise ValueError("Lo ZIP scaricato coincide con il contesto inviato all’AI.")
 
     status = str(request.get("status", ""))
-    if status == "update_ready" and str(request.get("update_zip_path", "")) == str(target):
-        plan_id = str(request.get("plan_id", "")).strip()
-        if plan_id:
+    if request.get("request_kind") == "operational":
+        if status == "result_ready" and str(request.get("result_zip_path", "")) == str(target):
             return {
-                "action": "update_ready",
+                "action": "result_ready",
                 "path": str(target),
-                "plan_id": plan_id,
-                "pre_apply": dict(request.get("pre_apply") or {}),
+                "mission_id": str(request.get("mission_id", "")),
+                "preview": dict(request.get("result_preview") or {}),
             }
-    if status not in {"waiting_update", "update_ready"}:
-        raise ValueError("La richiesta non è in attesa dello ZIP finale.")
+        if status not in {"waiting_result", "result_ready"}:
+            raise ValueError("La missione non è in attesa dello ZIP dei risultati.")
+    else:
+        if status == "update_ready" and str(request.get("update_zip_path", "")) == str(target):
+            plan_id = str(request.get("plan_id", "")).strip()
+            if plan_id:
+                return {
+                    "action": "update_ready",
+                    "path": str(target),
+                    "plan_id": plan_id,
+                    "pre_apply": dict(request.get("pre_apply") or {}),
+                }
+        if status not in {"waiting_update", "update_ready"}:
+            raise ValueError("La richiesta non è in attesa dello ZIP finale.")
     return _register_update_path(state, request_id, workspace, target)
 
 

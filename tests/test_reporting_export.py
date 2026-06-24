@@ -855,3 +855,81 @@ def test_typescript_diagnostics_do_not_claim_python_validation(tmp_path: Path) -
     assert "Parsing AST Python: nessun file Python incluso nel contesto sintetico." in report
     assert "JavaScript/TypeScript: firme estratte euristicamente da 1 file" in report
     assert "sintassi non validata durante il report" in report
+
+
+def test_report_text_file_operations_mode_is_explicit_and_optional(tmp_path: Path) -> None:
+    from local_ai_bridge.core.settings import AppSettings
+
+    (tmp_path / "app.py").write_text("VALUE = 1\n", encoding="utf-8")
+    standard = build_super_report(
+        tmp_path,
+        "Aggiorna app",
+        settings=AppSettings(textual_file_operations_mode=False),
+    )
+    structured = build_super_report(
+        tmp_path,
+        "Aggiorna app",
+        settings=AppSettings(textual_file_operations_mode=True),
+    )
+
+    assert "**FORMATO FILE RICHIESTI — ZIP**" in standard
+    assert "**FORMATO MODIFICHE — ZIP**" in standard
+    assert "SEARCH/REPLACE" not in standard
+    assert "**FORMATO MODIFICHE — File Markdown di aggiornamento**" not in standard
+    assert "**FORMATO MODIFICHE — File Markdown di aggiornamento**" in structured
+    assert "OPERATION: REPLACE" in structured
+    assert "OPERATION: CREATE" in structured
+    assert "OPERATION: DELETE" in structured
+    assert "FINAL_NEWLINE: YES" in structured
+    assert "FINAL_NEWLINE: NO" in structured
+    assert "OPERATION: CREATE oppure REPLACE" not in structured
+    assert "FINAL_NEWLINE: YES oppure NO" not in structured
+    assert "Non racchiudere l'intera risposta" in structured
+    assert "non produrre ZIP, non usare SEARCH/REPLACE" in structured
+    assert "`bridgai-update.md`" in structured
+    assert "crea un singolo file scaricabile" in structured
+    assert "usa il copia-incolla soltanto" in structured
+    assert "**FORMATO MODIFICHE — ZIP**" not in structured
+
+
+def test_empty_workspace_uses_create_operations_when_text_mode_is_active(tmp_path: Path) -> None:
+    from local_ai_bridge.core.settings import AppSettings
+
+    report = build_super_report(
+        tmp_path,
+        "Crea il progetto",
+        settings=AppSettings(textual_file_operations_mode=True),
+    )
+
+    assert "un unico file `bridgai-update.md`" in report
+    assert "operazioni `CREATE` complete" in report
+    assert "Non usare ZIP né `#scarica`" in report
+    assert "**Applica ZIP**" not in report
+
+
+def test_report_combines_markdown_download_with_text_or_zip_updates(tmp_path: Path) -> None:
+    from local_ai_bridge.core.settings import AppSettings
+
+    (tmp_path / "app.py").write_text("VALUE = 1\n", encoding="utf-8")
+    markdown_zip = build_super_report(
+        tmp_path,
+        "Aggiorna app",
+        settings=AppSettings(
+            markdown_exchange_mode=True,
+            textual_file_operations_mode=False,
+        ),
+    )
+    markdown_text = build_super_report(
+        tmp_path,
+        "Aggiorna app",
+        settings=AppSettings(
+            markdown_exchange_mode=True,
+            textual_file_operations_mode=True,
+        ),
+    )
+
+    assert "**FORMATO FILE RICHIESTI — Markdown**" in markdown_zip
+    assert "**FORMATO MODIFICHE — ZIP**" in markdown_zip
+    assert "**FORMATO FILE RICHIESTI — Markdown**" in markdown_text
+    assert "**FORMATO MODIFICHE — File Markdown di aggiornamento**" in markdown_text
+    assert "`bridgai-update.md`" in markdown_text

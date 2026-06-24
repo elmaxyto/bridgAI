@@ -11,7 +11,19 @@ from platformdirs import user_data_dir
 APP_NAME = "LocalAIBridge"
 APP_AUTHOR = "LocalAIBridge"
 DEFAULT_SIMPLE_MODE = True
+DEVELOPMENT_MODE = "development"
+OPERATIONS_MODE = "operations"
+PRIMARY_MODES = (DEVELOPMENT_MODE, OPERATIONS_MODE)
+LEGACY_PRIMARY_MODE = DEVELOPMENT_MODE
 MAX_RECENT_WORKSPACES = 10
+AI_ASSISTANT_SOURCES = ("gemma_internal", "ollama", "cloud_provider")
+AI_ASSISTANT_CLOUD_PROVIDERS = (
+    "groq",
+    "cerebras",
+    "gemini",
+    "mistral",
+    "openrouter",
+)
 
 
 def app_data_dir() -> Path:
@@ -23,6 +35,7 @@ def app_data_dir() -> Path:
 @dataclass(slots=True)
 class AppSettings:
     language: str = "it"
+    primary_mode: str = ""
     last_workspace: str = ""
     recent_workspaces: list[str] = field(default_factory=list)
     simple_mode: bool = DEFAULT_SIMPLE_MODE
@@ -34,9 +47,18 @@ class AppSettings:
     grok_url: str = "https://grok.com/"
     temp_directory: str = ""
     update_zip_directory: str = ""
+    ai_assistant_enabled: bool = False
+    ai_assistant_source: str = "gemma_internal"
+    ai_assistant_gemma_downloaded: bool = False
+    ai_assistant_ollama_url: str = "http://localhost:11434"
+    ai_assistant_ollama_model: str = ""
+    ai_assistant_cloud_provider: str = "groq"
+    ai_assistant_cloud_key: str = ""
+    ai_assistant_cloud_model: str = ""
     gemini_drive_enabled: bool = False
     gemini_drive_path: str = ""
     markdown_exchange_mode: bool = False
+    textual_file_operations_mode: bool = False
     browser_extension_enabled: bool = False
     browser_extension_remote_access: bool = False
     browser_extension_auto_send: bool = True
@@ -85,6 +107,16 @@ def normalize_recent_workspaces(
     return normalized
 
 
+def normalize_primary_mode(
+    value: object,
+    default: str = LEGACY_PRIMARY_MODE,
+) -> str:
+    """Return a supported primary mode without inferring workspace type."""
+    if isinstance(value, str) and value in PRIMARY_MODES:
+        return value
+    return default
+
+
 def remember_recent_workspace(
     recent_workspaces: object,
     workspace: str | Path,
@@ -106,11 +138,36 @@ class SettingsStore:
         try:
             data = json.loads(self.path.read_text(encoding="utf-8"))
             values = {k: v for k, v in data.items() if k in AppSettings.__annotations__}
+            values["primary_mode"] = normalize_primary_mode(
+                data.get("primary_mode"),
+                LEGACY_PRIMARY_MODE,
+            )
             values["recent_workspaces"] = normalize_recent_workspaces(
                 values.get("recent_workspaces", [])
             )
             if not isinstance(values.get("web_totp_recovery_hashes", []), list):
                 values["web_totp_recovery_hashes"] = []
+            if not isinstance(values.get("markdown_exchange_mode", False), bool):
+                values["markdown_exchange_mode"] = False
+            if not isinstance(values.get("textual_file_operations_mode", False), bool):
+                values["textual_file_operations_mode"] = False
+            if not isinstance(values.get("ai_assistant_enabled", False), bool):
+                values["ai_assistant_enabled"] = False
+            if not isinstance(values.get("ai_assistant_gemma_downloaded", False), bool):
+                values["ai_assistant_gemma_downloaded"] = False
+            if values.get("ai_assistant_source") not in AI_ASSISTANT_SOURCES:
+                values["ai_assistant_source"] = "gemma_internal"
+            if values.get("ai_assistant_cloud_provider") not in AI_ASSISTANT_CLOUD_PROVIDERS:
+                values["ai_assistant_cloud_provider"] = "groq"
+            ai_string_defaults = {
+                "ai_assistant_ollama_url": "http://localhost:11434",
+                "ai_assistant_ollama_model": "",
+                "ai_assistant_cloud_key": "",
+                "ai_assistant_cloud_model": "",
+            }
+            for key, default in ai_string_defaults.items():
+                if not isinstance(values.get(key, default), str):
+                    values[key] = default
             return AppSettings(**values)
         except Exception:
             return AppSettings()

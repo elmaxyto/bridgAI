@@ -13,6 +13,8 @@ def test_configured_root_uses_managed_subdirectory(tmp_path: Path) -> None:
     assert root == (tmp_path / "LocalAIBridgeTemp").resolve()
     assert (root / ".local_ai_bridge_temp").is_file()
     assert (root / "exports").is_dir()
+    assert (root / "ai_models").is_dir()
+    assert managed_subdir(tmp_path, "ai_models").is_dir()
 
 
 def test_stage_import_zip_copies_to_managed_area(tmp_path: Path) -> None:
@@ -35,6 +37,7 @@ def test_clean_only_managed_directory(tmp_path: Path) -> None:
     assert outside.read_text(encoding="utf-8") == "keep"
     assert (root / ".local_ai_bridge_temp").exists()
     assert (root / "exports").is_dir()
+    assert (root / "ai_models").is_dir()
 
 
 def test_latest_zip_file_returns_most_recent_zip(tmp_path: Path) -> None:

@@ -301,11 +301,23 @@ async function deliverRequest(request) {
   activeRequestId = request.request_id;
   activeTabId = tab.id;
   await waitForTab(tab.id);
-  const message = {
-    type: "BRIDGAI_SEND_PROMPT",
-    requestId: request.request_id,
-    prompt: request.prompt
-  };
+  let message;
+  if (request.initial_attachment && request.artifact_url) {
+    const artifactBase64 = await downloadArtifact(request.artifact_url);
+    message = {
+      type: "BRIDGAI_ATTACH_CONTEXT",
+      requestId: request.request_id,
+      artifactBase64,
+      filename: request.filename || request.context_filename || "bridgai_missione.zip",
+      followupPrompt: request.prompt
+    };
+  } else {
+    message = {
+      type: "BRIDGAI_SEND_PROMPT",
+      requestId: request.request_id,
+      prompt: request.prompt
+    };
+  }
   let result;
   try {
     result = await chrome.tabs.sendMessage(tab.id, message);

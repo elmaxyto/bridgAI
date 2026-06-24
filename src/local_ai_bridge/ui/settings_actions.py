@@ -1,9 +1,16 @@
 from __future__ import annotations
-from local_ai_bridge.i18n import tr as _
+
 from pathlib import Path
+
+from local_ai_bridge.i18n import tr as _
 from PySide6.QtCore import QUrl
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import QFileDialog, QMessageBox
+from local_ai_bridge.core.settings import (
+    DEVELOPMENT_MODE,
+    OPERATIONS_MODE,
+    PRIMARY_MODES,
+)
 from local_ai_bridge.core.project_prompts import (
     load_project_ignore,
     load_project_prompt,
@@ -16,7 +23,57 @@ from local_ai_bridge.web.security import hash_password
 from local_ai_bridge.ui.totp_dialog import enroll_totp
 GOOGLE_DRIVE_DOWNLOAD_URL = 'https://support.google.com/drive/answer/7329379'
 
+
 class SettingsActionsMixin:
+    def refresh_primary_mode_settings(self) -> None:
+        combo = getattr(self, 'primary_mode_combo', None)
+        if combo is None:
+            return
+        combo.blockSignals(True)
+        index = combo.findData(self.settings.primary_mode)
+        combo.setCurrentIndex(index if index >= 0 else 0)
+        combo.blockSignals(False)
+
+    def set_primary_mode(self, mode: str) -> None:
+        if mode not in PRIMARY_MODES:
+            return
+        changed = self.settings.primary_mode != mode
+        self.settings.primary_mode = mode
+        self.settings_store.save(self.settings)
+        self.refresh_primary_mode_settings()
+        self.apply_simple_mode()
+        if changed:
+            target_tab = (
+                getattr(self, 'operations_tab', None)
+                if mode == OPERATIONS_MODE
+                else getattr(self, 'workflow_tab', None)
+            )
+            tabs = getattr(self, 'tabs', None)
+            if target_tab is not None and tabs is not None:
+                tabs.setCurrentWidget(target_tab)
+            self._show_status(
+                _('Modalità Operativa attivata.')
+                if mode == OPERATIONS_MODE
+                else _('Modalità Sviluppo attivata.')
+            )
+
+    def save_primary_mode(self, _index: int = -1) -> None:
+        combo = getattr(self, 'primary_mode_combo', None)
+        if combo is None:
+            return
+        mode = combo.currentData()
+        if isinstance(mode, str):
+            self.set_primary_mode(mode)
+
+    def activate_development_mode(self, _checked: bool = False) -> None:
+        self.set_primary_mode(DEVELOPMENT_MODE)
+
+    def open_mode_settings(self, _checked: bool = False) -> None:
+        settings_tab = getattr(self, 'settings_tab', None)
+        tabs = getattr(self, 'tabs', None)
+        if settings_tab is not None and tabs is not None:
+            tabs.setCurrentWidget(settings_tab)
+
     def set_dark_mode(self, enabled: bool) -> None:
         self.settings.dark_mode = bool(enabled)
         self.settings_store.save(self.settings)
@@ -336,50 +393,68 @@ class SettingsActionsMixin:
         self.gemini_drive_enabled_check.blockSignals(False)
         self.gemini_drive_path_edit.setText(self.settings.gemini_drive_path)
 
+    @staticmethod
+    def _set_combo_value(combo, value: str) -> None:
+        combo.blockSignals(True)
+        index = combo.findData(value)
+        combo.setCurrentIndex(index if index >= 0 else 0)
+        combo.blockSignals(False)
+
     def refresh_markdown_exchange_settings(self) -> None:
-        self.markdown_exchange_mode_check.blockSignals(True)
-        self.markdown_exchange_mode_check.setChecked(self.settings.markdown_exchange_mode)
-        self.markdown_exchange_mode_check.blockSignals(False)
+        self._set_combo_value(
+            self.requested_files_format_combo,
+            'markdown' if self.settings.markdown_exchange_mode else 'zip',
+        )
+
+    def refresh_textual_file_operations_settings(self) -> None:
+        self._set_combo_value(
+            self.update_format_combo,
+            'text' if self.settings.textual_file_operations_mode else 'zip',
+        )
+
+    def set_requested_files_format(self, value: object) -> None:
+        format_name = str(value)
+        if format_name not in {'zip', 'markdown'}:
+            return
+        self.settings.markdown_exchange_mode = format_name == 'markdown'
+        self.settings_store.save(self.settings)
+        self.apply_simple_mode()
+        self._show_status(
+            _('Formato file richiesti: Markdown.')
+            if self.settings.markdown_exchange_mode
+            else _('Formato file richiesti: ZIP.')
+        )
+
+    def set_update_format(self, value: object) -> None:
+        format_name = str(value)
+        if format_name not in {'zip', 'text'}:
+            return
+        self.settings.textual_file_operations_mode = format_name == 'text'
+        self.settings_store.save(self.settings)
+        self.apply_simple_mode()
+        self._show_status(
+            _('Formato modifiche: File Markdown di aggiornamento.')
+            if self.settings.textual_file_operations_mode
+            else _('Formato modifiche: ZIP.')
+        )
+
+    def set_textual_file_operations_mode(self, enabled: bool) -> None:
+        self.set_update_format('text' if enabled else 'zip')
+        self.refresh_textual_file_operations_settings()
 
     def set_markdown_exchange_mode(self, enabled: bool) -> None:
-        enabled = bool(enabled)
-        gemini_was_enabled = enabled and self.settings.gemini_drive_enabled
-        self.settings.markdown_exchange_mode = enabled
-        if gemini_was_enabled:
-            self.settings.gemini_drive_enabled = False
-            self.refresh_gemini_drive_settings()
-        self.settings_store.save(self.settings)
-        self.apply_simple_mode()
-        if gemini_was_enabled:
-            message = _(
-                'Modalità Markdown Exchange attivata. Gemini è stata disattivata automaticamente.'
-            )
-        else:
-            message = _(
-                'Modalità Markdown Exchange attivata.'
-                if enabled else 'Modalità Markdown Exchange disattivata.'
-            )
-        self._show_status(message)
+        self.set_requested_files_format('markdown' if enabled else 'zip')
+        self.refresh_markdown_exchange_settings()
 
     def set_gemini_drive_enabled(self, enabled: bool) -> None:
-        enabled = bool(enabled)
-        markdown_was_enabled = enabled and self.settings.markdown_exchange_mode
-        self.settings.gemini_drive_enabled = enabled
+        self.settings.gemini_drive_enabled = bool(enabled)
         self.settings.gemini_drive_path = self.gemini_drive_path_edit.text().strip()
-        if markdown_was_enabled:
-            self.settings.markdown_exchange_mode = False
-            self.refresh_markdown_exchange_settings()
         self.settings_store.save(self.settings)
         self.apply_simple_mode()
-        if markdown_was_enabled:
-            message = _(
-                'Modalità Gemini attivata. Markdown Exchange è stata disattivata automaticamente.'
-            )
-        else:
-            message = _(
-                'Modalità Gemini attivata.' if enabled else 'Modalità Gemini disattivata.'
-            )
-        self._show_status(message)
+        self._show_status(
+            _('Trasporto ZIP tramite Google Drive attivato.')
+            if enabled else _('Trasporto ZIP tramite Google Drive disattivato.')
+        )
 
     def save_gemini_drive_path(self) -> None:
         path = self.gemini_drive_path_edit.text().strip()
@@ -423,6 +498,10 @@ class SettingsActionsMixin:
             return
         self.clear_plan()
         result = clean_managed_temp(self.settings.temp_directory)
+        self.settings.ai_assistant_gemma_downloaded = False
+        self.settings_store.save(self.settings)
+        if hasattr(self, 'ai_assistant_gemma_status_label'):
+            self.refresh_ai_assistant_settings()
         self.zip_path_edit.clear()
         QMessageBox.information(self, _('Pulizia completata'), f'File rimossi: {result.files_removed}\nCartelle rimosse: {result.directories_removed}\nSpazio rilevato: {result.bytes_removed / 1024:.1f} KiB')
         self._show_status(_('Cartella temporanea pulita.'))

@@ -417,3 +417,112 @@ def test_browser_automation_hides_plan_after_workspace_switch(
         server.shutdown()
         server.server_close()
         thread.join(timeout=5)
+
+
+def test_power_user_settings_require_remote_authentication_and_csrf(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+    token = "p" * 32
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    security = WebSecurityConfig.build(
+        host="0.0.0.0",
+        auth_token=token,
+        fixed_workspace=workspace,
+    )
+    state = BridgeState(security=security)
+    server = BridgeHTTPServer(("127.0.0.1", 0), state)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base = f"http://127.0.0.1:{server.server_address[1]}"
+    payload = {
+        "include_custom_prompts": True,
+        "global_prompt": "Remote authenticated prompt",
+        "markdown_exchange_mode": False,
+        "textual_file_operations_mode": False,
+        "project_prompt": "",
+        "project_ignore": "",
+        "confirm": "SAVE_POWER_USER_SETTINGS",
+    }
+    try:
+        status, _ = _json_request(base + "/api/power-user/settings")
+        assert status == 401
+
+        status, response = _json_request(
+            base + "/api/power-user/settings",
+            token=token,
+        )
+        assert status == 200
+        assert response["project_available"] is True
+
+        status, _ = _json_request(
+            base + "/api/power-user/settings",
+            method="POST",
+            payload=payload,
+            token=token,
+        )
+        assert status == 403
+
+        status, response = _json_request(
+            base + "/api/power-user/settings",
+            method="POST",
+            payload=payload,
+            token=token,
+            csrf=state.csrf_token,
+        )
+        assert status == 200
+        assert response["global_prompt"] == "Remote authenticated prompt"
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+def test_remote_export_returns_downloadable_markdown_when_selected(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+    token = "m" * 32
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "sample.py").write_text("print('ok')\n", encoding="utf-8")
+    security = WebSecurityConfig.build(
+        host="0.0.0.0",
+        auth_token=token,
+        fixed_workspace=workspace,
+    )
+    state = BridgeState(security=security)
+    state.settings.markdown_exchange_mode = True
+    state.settings_store.save(state.settings)
+    server = BridgeHTTPServer(("127.0.0.1", 0), state)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base = f"http://127.0.0.1:{server.server_address[1]}"
+    try:
+        status, payload = _json_request(
+            base + "/api/export",
+            method="POST",
+            payload={"text": "#scarica sample.py"},
+            token=token,
+            csrf=state.csrf_token,
+        )
+        assert status == 200
+        assert payload["format"] == "markdown"
+        assert payload["filename"].endswith(".md")
+        request = urllib.request.Request(
+            base + f"/api/artifacts/{payload['artifact_id']}",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        with urllib.request.urlopen(request, timeout=5) as response:
+            document = response.read().decode("utf-8")
+            assert response.headers.get_content_type() == "text/markdown"
+        assert "BRIDGAI:MARKDOWN-EXCHANGE 1" in document
+        assert "BRIDGAI:FILE sample.py" in document
+        assert "print('ok')" in document
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)

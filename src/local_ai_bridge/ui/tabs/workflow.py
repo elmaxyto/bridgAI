@@ -118,7 +118,7 @@ def build_workflow_tab(window) -> QWidget:
     window.target_form = form
     response_layout.addLayout(form)
     response_buttons = QHBoxLayout()
-    response_actions = ((_('Analizza risposta'), window.analyze_response), (_('Esporta file #scarica'), window.export_requested_files), (_('Apri cartella #scarica'), window.open_download_folder), (_('Prepara patch'), window.prepare_patch), (_('Prepara file completo'), window.prepare_full_file))
+    response_actions = ((_('Analizza risposta'), window.analyze_response), (_('Esporta file #scarica'), window.export_requested_files), (_('Apri cartella #scarica'), window.open_download_folder), (_('Prepara file completo'), window.prepare_full_file))
     window.response_action_buttons = []
     for label, callback in response_actions:
         button = _button(label, callback)
@@ -188,31 +188,58 @@ def build_workflow_tab(window) -> QWidget:
     window.simple_finish_hint.setWordWrap(True)
     layout.addWidget(window.simple_finish_hint)
 
-    gemini_result_group = QGroupBox()
-    gemini_result_group.setProperty('class', 'card')
-    window.gemini_result_group = gemini_result_group
-    gemini_result_layout = QVBoxLayout(gemini_result_group)
-    gemini_result_layout.setContentsMargins(18, 16, 18, 18)
-    gemini_result_layout.setSpacing(12)
-    gemini_beta_warning = QLabel(_('Modalità Gemini — Beta: questa integrazione è ancora in fase di perfezionamento e potrebbe non funzionare correttamente. Gemini può avere difficoltà a restituire patch complete e codice applicabile; controlla sempre con attenzione l’anteprima prima di applicare le modifiche.'))
-    gemini_beta_warning.setProperty('class', 'warningBanner')
-    gemini_beta_warning.setWordWrap(True)
-    gemini_result_layout.addWidget(gemini_beta_warning)
-    gemini_result_layout.addWidget(
+    text_result_group = QGroupBox()
+    text_result_group.setProperty('class', 'card')
+    window.text_result_group = text_result_group
+    text_result_layout = QVBoxLayout(text_result_group)
+    text_result_layout.setContentsMargins(18, 16, 18, 18)
+    text_result_layout.setSpacing(12)
+    text_result_layout.addWidget(
         _step_header(
             '3',
-            _('Incolla il codice restituito da Gemini'),
-            _('Copia l’intera risposta: BridgAI riconoscerà i percorsi e i blocchi SEARCH/REPLACE.'),
+            _('Carica il file Markdown di aggiornamento'),
+            _(
+                'Seleziona o trascina un file .md o .txt con operazioni CREATE, REPLACE e DELETE. '
+                'BridgAI mostrerà il diff prima di applicare qualsiasi file.'
+            ),
         )
     )
-    window.gemini_result_edit = QPlainTextEdit()
-    window.gemini_result_edit.setPlaceholderText(_('Incolla qui la risposta completa di Gemini con percorsi e blocchi SEARCH/REPLACE...'))
-    window.gemini_result_edit.setProperty('class', 'largeInput')
-    gemini_result_layout.addWidget(window.gemini_result_edit, 2)
-    gemini_result_buttons = QHBoxLayout()
-    gemini_result_buttons.addWidget(_button(_('Incolla risposta Gemini'), window.paste_gemini_result_from_clipboard, 'primary'))
-    gemini_result_buttons.addWidget(_button(_('Prepara anteprima modifiche'), window.prepare_gemini_plan, 'primary'))
-    gemini_result_buttons.addStretch(1)
-    gemini_result_layout.addLayout(gemini_result_buttons)
-    layout.addWidget(gemini_result_group, 2)
+    text_file_row = QHBoxLayout()
+    window.text_update_path_edit = QLineEdit()
+    window.text_update_path_edit.setReadOnly(True)
+    window.text_update_path_edit.setPlaceholderText(
+        _('Nessun file Markdown di aggiornamento selezionato.')
+    )
+    text_file_row.addWidget(window.text_update_path_edit, 1)
+    text_file_row.addWidget(
+        _button(_('Scegli file…'), window.choose_text_update_file)
+    )
+    text_file_row.addWidget(
+        _button(_('Analizza file'), window.analyze_selected_text_update_file, 'primary')
+    )
+    text_result_layout.addLayout(text_file_row)
+
+    manual_label = QLabel(_('Oppure incolla manualmente la risposta'))
+    manual_label.setProperty('class', 'sectionTitle')
+    text_result_layout.addWidget(manual_label)
+    window.text_result_edit = QPlainTextEdit()
+    window.text_result_edit.setPlaceholderText(
+        _('Incolla qui le operazioni complete del file Markdown di aggiornamento...')
+    )
+    window.text_result_edit.setProperty('class', 'largeInput')
+    text_result_layout.addWidget(window.text_result_edit, 2)
+    text_result_buttons = QHBoxLayout()
+    text_result_buttons.addWidget(
+        _button(_('Incolla'), window.paste_text_result_from_clipboard, 'secondary')
+    )
+    text_result_buttons.addWidget(
+        _button(_('Analizza testo incollato'), window.prepare_text_result_plan, 'primary')
+    )
+    text_result_buttons.addStretch(1)
+    text_result_layout.addLayout(text_result_buttons)
+    layout.addWidget(text_result_group, 2)
+
+    # Alias interni mantenuti per la pulizia dello stato e la retrocompatibilità UI.
+    window.gemini_result_group = text_result_group
+    window.gemini_result_edit = window.text_result_edit
     return page
