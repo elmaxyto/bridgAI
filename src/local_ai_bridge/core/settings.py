@@ -24,6 +24,16 @@ AI_ASSISTANT_CLOUD_PROVIDERS = (
     "mistral",
     "openrouter",
 )
+PREFERRED_WEB_AI_CHATGPT = "chatgpt"
+PREFERRED_WEB_AI_CLAUDE = "claude"
+PREFERRED_WEB_AI_GEMINI = "gemini"
+PREFERRED_WEB_AI_CUSTOM = "custom"
+PREFERRED_WEB_AI_VALUES = (
+    PREFERRED_WEB_AI_CHATGPT,
+    PREFERRED_WEB_AI_CLAUDE,
+    PREFERRED_WEB_AI_GEMINI,
+    PREFERRED_WEB_AI_CUSTOM,
+)
 
 
 def app_data_dir() -> Path:
@@ -39,6 +49,7 @@ class AppSettings:
     last_workspace: str = ""
     recent_workspaces: list[str] = field(default_factory=list)
     simple_mode: bool = DEFAULT_SIMPLE_MODE
+    preferred_web_ai: str = PREFERRED_WEB_AI_CUSTOM
     dark_mode: bool = False
     include_custom_prompts: bool = True
     global_prompt: str = ""
@@ -117,6 +128,26 @@ def normalize_primary_mode(
     return default
 
 
+def normalize_preferred_web_ai(
+    value: object,
+    default: str = PREFERRED_WEB_AI_CUSTOM,
+) -> str:
+    """Return a supported preferred Web AI identifier."""
+    if isinstance(value, str) and value in PREFERRED_WEB_AI_VALUES:
+        return value
+    return default
+
+
+def preferred_web_ai_exchange_formats(value: object) -> tuple[bool, bool] | None:
+    """Return ``(requested_markdown, update_markdown)`` for a provider preset."""
+    preferred = normalize_preferred_web_ai(value, PREFERRED_WEB_AI_CUSTOM)
+    if preferred in {PREFERRED_WEB_AI_CHATGPT, PREFERRED_WEB_AI_CLAUDE}:
+        return False, False
+    if preferred == PREFERRED_WEB_AI_GEMINI:
+        return False, True
+    return None
+
+
 def remember_recent_workspace(
     recent_workspaces: object,
     workspace: str | Path,
@@ -145,12 +176,23 @@ class SettingsStore:
             values["recent_workspaces"] = normalize_recent_workspaces(
                 values.get("recent_workspaces", [])
             )
+            preferred_web_ai = normalize_preferred_web_ai(
+                data.get("preferred_web_ai"),
+                PREFERRED_WEB_AI_CUSTOM,
+            )
+            values["preferred_web_ai"] = preferred_web_ai
             if not isinstance(values.get("web_totp_recovery_hashes", []), list):
                 values["web_totp_recovery_hashes"] = []
             if not isinstance(values.get("markdown_exchange_mode", False), bool):
                 values["markdown_exchange_mode"] = False
             if not isinstance(values.get("textual_file_operations_mode", False), bool):
                 values["textual_file_operations_mode"] = False
+            preferred_formats = preferred_web_ai_exchange_formats(preferred_web_ai)
+            if preferred_formats is not None:
+                (
+                    values["markdown_exchange_mode"],
+                    values["textual_file_operations_mode"],
+                ) = preferred_formats
             if not isinstance(values.get("ai_assistant_enabled", False), bool):
                 values["ai_assistant_enabled"] = False
             if not isinstance(values.get("ai_assistant_gemma_downloaded", False), bool):

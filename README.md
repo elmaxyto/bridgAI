@@ -32,7 +32,7 @@ BridgAI keeps that workflow explicit and controlled:
 
 ## Developed through its own workflow
 
-BridgAI has been developed iteratively using BridgAI itself. The early 0.1 version supplied the report, controlled export, review, and apply workflow that was then used to implement subsequent versions up to 1.0.0, including the current Git commit-message workflow.
+BridgAI has been developed iteratively using BridgAI itself. The early 0.1 version supplied the report, controlled export, review, and apply workflow that was then used to implement subsequent versions up to 1.1.0, including the current Git commit-message workflow.
 
 This provides practical end-to-end validation of the application's core use case. It complements, rather than replaces, repeatable automated tests.
 
@@ -56,10 +56,17 @@ Review every proposed change before applying it. BridgAI reduces risk, but it ca
 
 - Desktop interface built with PySide6
 - Localhost web interface
+- Optional browser extension for controlled browser-assisted exchanges
+- Operational missions with persisted history, execution results, and artifacts
+- Configurable local and cloud AI assistant providers
+- Global and per-project prompts and report exclusions
+- ZIP, Markdown, and complete textual file-operation workflows
+- Optional TOTP two-factor authentication for remote Web access
+- Persistent Web language, theme, and voice-dictation controls
 - Structured Super-Report generation
 - Controlled `#scarica` file export workflow
 - ZIP inspection and unified diff preview
-- SEARCH/REPLACE patch support
+- Legacy SEARCH/REPLACE patch compatibility
 - Complete-file replacement support
 - Transactional apply operations
 - Persistent backups and rollback

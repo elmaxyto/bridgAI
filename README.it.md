@@ -32,7 +32,7 @@ BridgAI rende questo flusso esplicito e controllato:
 
 ## Sviluppato attraverso il proprio flusso
 
-BridgAI è stato sviluppato in modo iterativo usando BridgAI stesso. La prima versione 0.1 ha fornito il flusso di report, esportazione controllata, revisione e applicazione che è stato poi usato per realizzare le versioni successive fino alla 1.0.0, compreso l’attuale flusso dei messaggi di commit Git.
+BridgAI è stato sviluppato in modo iterativo usando BridgAI stesso. La prima versione 0.1 ha fornito il flusso di report, esportazione controllata, revisione e applicazione che è stato poi usato per realizzare le versioni successive fino alla 1.1.0, compreso l’attuale flusso dei messaggi di commit Git.
 
 Questa esperienza costituisce una validazione end-to-end concreta del caso d’uso principale dell’applicazione. Integra, ma non sostituisce, i test automatici ripetibili.
 
@@ -67,10 +67,17 @@ Controlla sempre ogni modifica proposta prima di applicarla. BridgAI riduce il r
 
 - Interfaccia desktop PySide6
 - Interfaccia web locale
+- Estensione browser opzionale per scambi assistiti e controllati
+- Missioni operative con cronologia, risultati e artefatti persistenti
+- Provider configurabili per assistenti AI locali e cloud
+- Prompt globali e per progetto ed esclusioni dal report
+- Flussi ZIP, Markdown e operazioni testuali su file completi
+- Autenticazione a due fattori TOTP opzionale per l’accesso Web remoto
+- Lingua, tema e dettatura persistenti nella Web UI
 - Generazione del Super-Report
 - Esportazione controllata tramite protocollo `#scarica`
 - Analisi ZIP e anteprima diff
-- Patch SEARCH/REPLACE
+- Compatibilità legacy con patch SEARCH/REPLACE
 - Sostituzione di file completi
 - Applicazione transazionale
 - Backup persistenti e rollback

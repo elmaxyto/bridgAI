@@ -9,6 +9,7 @@ from PySide6.QtWidgets import QFileDialog, QMessageBox
 from local_ai_bridge.core.settings import (
     DEVELOPMENT_MODE,
     OPERATIONS_MODE,
+    PREFERRED_WEB_AI_CUSTOM,
     PRIMARY_MODES,
 )
 from local_ai_bridge.core.project_prompts import (
@@ -21,10 +22,11 @@ from local_ai_bridge.services.temp_storage import clean_managed_temp, configured
 from local_ai_bridge.web.launcher import start_web_interface, stop_web_interface
 from local_ai_bridge.web.security import hash_password
 from local_ai_bridge.ui.totp_dialog import enroll_totp
+from local_ai_bridge.ui.preferred_web_ai_actions import PreferredWebAIActionsMixin
 GOOGLE_DRIVE_DOWNLOAD_URL = 'https://support.google.com/drive/answer/7329379'
 
 
-class SettingsActionsMixin:
+class SettingsActionsMixin(PreferredWebAIActionsMixin):
     def refresh_primary_mode_settings(self) -> None:
         combo = getattr(self, 'primary_mode_combo', None)
         if combo is None:
@@ -416,9 +418,11 @@ class SettingsActionsMixin:
         format_name = str(value)
         if format_name not in {'zip', 'markdown'}:
             return
+        self.settings.preferred_web_ai = PREFERRED_WEB_AI_CUSTOM
         self.settings.markdown_exchange_mode = format_name == 'markdown'
         self.settings_store.save(self.settings)
         self.apply_simple_mode()
+        self.refresh_preferred_web_ai_settings()
         self._show_status(
             _('Formato file richiesti: Markdown.')
             if self.settings.markdown_exchange_mode
@@ -429,9 +433,11 @@ class SettingsActionsMixin:
         format_name = str(value)
         if format_name not in {'zip', 'text'}:
             return
+        self.settings.preferred_web_ai = PREFERRED_WEB_AI_CUSTOM
         self.settings.textual_file_operations_mode = format_name == 'text'
         self.settings_store.save(self.settings)
         self.apply_simple_mode()
+        self.refresh_preferred_web_ai_settings()
         self._show_status(
             _('Formato modifiche: File Markdown di aggiornamento.')
             if self.settings.textual_file_operations_mode

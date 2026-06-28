@@ -72,13 +72,15 @@ def build_workflow_tab(window) -> QWidget:
         window.open_gemini,
         '#6c63ff',
     )
-    window.simple_report_buttons = [
-        window.simple_chatgpt_button,
-        window.simple_claude_button,
-        window.simple_gemini_button,
-    ]
-    for button in window.simple_report_buttons:
+    window.simple_provider_buttons = {
+        'chatgpt': window.simple_chatgpt_button,
+        'claude': window.simple_claude_button,
+        'gemini': window.simple_gemini_button,
+    }
+    window.simple_report_buttons = list(window.simple_provider_buttons.values())
+    for button in window.simple_provider_buttons.values():
         report_buttons.addWidget(button)
+    window.refresh_preferred_web_ai_settings()
     actions = ((_('Copia report'), window.copy_report), (_('Salva report'), window.save_report), (_('Apri ChatGPT'), lambda: window._open_web(window.settings.chatgpt_url)), (_('Apri Claude'), lambda: window._open_web(window.settings.claude_url)), (_('Apri Gemini'), window.open_gemini))
     window.report_extra_buttons = []
     for label, callback in actions:

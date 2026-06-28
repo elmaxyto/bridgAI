@@ -389,8 +389,13 @@ def test_web_page_exposes_power_user_settings_without_sensitive_fields() -> None
     assert 'id="globalPrompt"' in page
     assert 'id="projectPrompt"' in page
     assert 'id="projectIgnore"' in page
+    assert 'id="preferredWebAi"' in page
+    assert 'onchange="applyPreferredWebAiPreset()"' in page
     assert 'id="requestedFilesFormat"' in page
     assert 'id="updateFormat"' in page
+    assert 'data-provider="chatgpt"' in page
+    assert 'data-provider="claude"' in page
+    assert 'data-provider="gemini"' in page
     assert 'id="textualFileOperationsMode"' not in page
     assert "/api/power-user/settings" in page
     assert "Credenziali, 2FA, root progetti e chiavi cloud" in page
@@ -427,6 +432,7 @@ def test_web_power_user_settings_round_trip(tmp_path: Path, monkeypatch) -> None
         assert status == 200
         assert payload["project_available"] is True
         assert payload["workspace"] == str(workspace.resolve())
+        assert payload["preferred_web_ai"] == "custom"
 
         status, payload = _request(
             base + "/api/power-user/settings",
@@ -434,6 +440,7 @@ def test_web_power_user_settings_round_trip(tmp_path: Path, monkeypatch) -> None
             {
                 "include_custom_prompts": False,
                 "global_prompt": "Usa sempre type hints.",
+                "preferred_web_ai": "custom",
                 "markdown_exchange_mode": True,
                 "textual_file_operations_mode": True,
                 "project_prompt": "Mantieni compatibilità Python 3.11.",
@@ -445,6 +452,7 @@ def test_web_power_user_settings_round_trip(tmp_path: Path, monkeypatch) -> None
         assert status == 200
         assert payload["message"] == "Impostazioni power-user salvate."
         assert payload["include_custom_prompts"] is False
+        assert payload["preferred_web_ai"] == "custom"
         assert payload["markdown_exchange_mode"] is True
         assert payload["textual_file_operations_mode"] is True
         assert payload["project_prompt"] == "Mantieni compatibilità Python 3.11."
@@ -459,6 +467,26 @@ def test_web_power_user_settings_round_trip(tmp_path: Path, monkeypatch) -> None
         assert persisted["global_prompt"] == "Usa sempre type hints."
         assert persisted["project_prompt"] == "Mantieni compatibilità Python 3.11."
         assert persisted["project_ignore"] == "dist/\n*.sqlite\n"
+
+        status, payload = _request(
+            base + "/api/power-user/settings",
+            "POST",
+            {
+                "include_custom_prompts": False,
+                "global_prompt": "Usa sempre type hints.",
+                "preferred_web_ai": "gemini",
+                "markdown_exchange_mode": True,
+                "textual_file_operations_mode": False,
+                "project_prompt": "Mantieni compatibilità Python 3.11.",
+                "project_ignore": "dist/\n*.sqlite\n",
+                "confirm": "SAVE_POWER_USER_SETTINGS",
+            },
+            state.csrf_token,
+        )
+        assert status == 200
+        assert payload["preferred_web_ai"] == "gemini"
+        assert payload["markdown_exchange_mode"] is False
+        assert payload["textual_file_operations_mode"] is True
     finally:
         server.shutdown()
         server.server_close()
@@ -707,5 +735,6 @@ def test_web_power_user_settings_expose_ai_compatibility_table() -> None:
     assert '<th scope="row">Gemini Pro</th><td>ZIP o Markdown</td><td>Markdown</td>' in page
     assert '<th scope="row">Perplexity</th><td>Markdown consigliato</td><td>Markdown</td>' in page
     assert '<th scope="row">Microsoft Copilot</th><td>Markdown</td><td>Markdown</td>' in page
-    assert 'Markdown offre la massima compatibilità generale.' in page
+    assert 'ZIP → ZIP è il flusso consigliato ed è l’unico verificato come pienamente funzionante.' in page
+    assert 'le patch Markdown potrebbero non essere applicabili in tutti i casi.' in page
     assert '.compatibility-table-wrap' in page

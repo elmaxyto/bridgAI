@@ -2,9 +2,12 @@ from pathlib import Path
 
 from local_ai_bridge.core.settings import (
     MAX_RECENT_WORKSPACES,
+    PREFERRED_WEB_AI_CUSTOM,
+    PREFERRED_WEB_AI_GEMINI,
     AppSettings,
     SettingsStore,
     normalize_recent_workspaces,
+    preferred_web_ai_exchange_formats,
     remember_recent_workspace,
 )
 
@@ -482,8 +485,65 @@ def test_textual_file_operations_mode_rejects_invalid_persisted_value(tmp_path: 
 
 def test_exchange_format_defaults_remain_zip_to_zip() -> None:
     settings = AppSettings()
+    assert settings.preferred_web_ai == PREFERRED_WEB_AI_CUSTOM
     assert settings.markdown_exchange_mode is False
     assert settings.textual_file_operations_mode is False
+
+
+def test_preferred_web_ai_presets_map_to_exchange_formats() -> None:
+    assert preferred_web_ai_exchange_formats("chatgpt") == (False, False)
+    assert preferred_web_ai_exchange_formats("claude") == (False, False)
+    assert preferred_web_ai_exchange_formats("gemini") == (False, True)
+    assert preferred_web_ai_exchange_formats("custom") is None
+
+
+def test_preferred_web_ai_round_trip_reapplies_its_preset(tmp_path: Path) -> None:
+    store = SettingsStore()
+    store.path = tmp_path / "settings.json"
+    store.save(
+        AppSettings(
+            preferred_web_ai=PREFERRED_WEB_AI_GEMINI,
+            markdown_exchange_mode=True,
+            textual_file_operations_mode=False,
+        )
+    )
+
+    loaded = store.load()
+
+    assert loaded.preferred_web_ai == PREFERRED_WEB_AI_GEMINI
+    assert loaded.markdown_exchange_mode is False
+    assert loaded.textual_file_operations_mode is True
+
+
+def test_legacy_exchange_formats_become_custom_without_being_changed(
+    tmp_path: Path,
+) -> None:
+    store = SettingsStore()
+    store.path = tmp_path / "settings.json"
+    store.path.write_text(
+        '{"markdown_exchange_mode": true, "textual_file_operations_mode": false}',
+        encoding="utf-8",
+    )
+
+    loaded = store.load()
+
+    assert loaded.preferred_web_ai == PREFERRED_WEB_AI_CUSTOM
+    assert loaded.markdown_exchange_mode is True
+    assert loaded.textual_file_operations_mode is False
+
+
+def test_invalid_preferred_web_ai_falls_back_to_custom(tmp_path: Path) -> None:
+    store = SettingsStore()
+    store.path = tmp_path / "settings.json"
+    store.path.write_text(
+        '{"preferred_web_ai": "unknown", "textual_file_operations_mode": true}',
+        encoding="utf-8",
+    )
+
+    loaded = store.load()
+
+    assert loaded.preferred_web_ai == PREFERRED_WEB_AI_CUSTOM
+    assert loaded.textual_file_operations_mode is True
 
 
 def test_all_exchange_format_combinations_round_trip_independently(

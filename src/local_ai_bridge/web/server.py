@@ -280,6 +280,9 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 payload["markdown_exchange_mode"] = bool(
                     self.server.state.settings.markdown_exchange_mode
                 )
+                payload["preferred_web_ai"] = (
+                    self.server.state.settings.preferred_web_ai
+                )
                 payload["textual_file_operations_mode"] = bool(
                     self.server.state.settings.textual_file_operations_mode
                 )

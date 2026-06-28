@@ -933,3 +933,23 @@ def test_report_combines_markdown_download_with_text_or_zip_updates(tmp_path: Pa
     assert "**FORMATO FILE RICHIESTI — Markdown**" in markdown_text
     assert "**FORMATO MODIFICHE — File Markdown di aggiornamento**" in markdown_text
     assert "`bridgai-update.md`" in markdown_text
+
+
+def test_gemini_preference_selects_zip_requests_and_markdown_updates(
+    tmp_path: Path,
+) -> None:
+    from local_ai_bridge.core.settings import AppSettings, SettingsStore
+
+    (tmp_path / "app.py").write_text("VALUE = 1\n", encoding="utf-8")
+    store = SettingsStore()
+    store.path = tmp_path / "settings.json"
+    store.save(AppSettings(preferred_web_ai="gemini"))
+
+    report = build_super_report(
+        tmp_path,
+        "Aggiorna app",
+        settings=store.load(),
+    )
+
+    assert "**FORMATO FILE RICHIESTI — ZIP**" in report
+    assert "**FORMATO MODIFICHE — File Markdown di aggiornamento**" in report

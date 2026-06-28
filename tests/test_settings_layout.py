@@ -18,6 +18,7 @@ def test_advanced_settings_cards_are_grouped_in_requested_order() -> None:
     positions = [function_source.index(heading) for heading in headings]
     assert positions == sorted(positions)
     assert "ToggleSwitch(_('Tema scuro'))" in function_source
+    assert "_section('AI Web preferita')" in function_source
     assert "_section('Lingua interfaccia')" in function_source
     assert "_section('Cartella aggiornamenti')" in function_source
     assert "_section('Cartella file temporanei')" in function_source
@@ -37,6 +38,8 @@ def test_simple_preferences_keep_language_and_hide_other_llm_models() -> None:
     settings_function = settings_source[settings_source.index("def build_settings_tab"):]
     assert "interface_layout.addWidget(language_section)" in settings_function
     assert "advanced_settings_groups.append(language_section)" not in settings_function
+    assert "preferred_ai_section.setVisible(window.settings.simple_mode)" in settings_function
+    assert "window.simple_mode_check.toggled.connect(preferred_ai_section.setVisible)" in settings_function
 
     main_source = Path(main_window.__file__).read_text(encoding="utf-8")
     simple_mode_source = main_source[
@@ -121,6 +124,38 @@ def test_exchange_formats_and_gemini_transport_are_independent() -> None:
     assert "Google Drive" in window.status
 
 
+def test_preferred_web_ai_applies_presets_and_keeps_custom_flow() -> None:
+    from local_ai_bridge.ui.settings_actions import SettingsActionsMixin
+
+    class FakeStore:
+        def save(self, _settings: AppSettings) -> None:
+            pass
+
+    class FakeWindow(SettingsActionsMixin):
+        def __init__(self) -> None:
+            self.settings = AppSettings()
+            self.settings_store = FakeStore()
+            self.status = ""
+
+        def apply_simple_mode(self) -> None:
+            pass
+
+        def _show_status(self, message: str) -> None:
+            self.status = message
+
+    window = FakeWindow()
+    window.set_preferred_web_ai("gemini")
+    assert window.settings.preferred_web_ai == "gemini"
+    assert window.settings.markdown_exchange_mode is False
+    assert window.settings.textual_file_operations_mode is True
+
+    window.set_preferred_web_ai("custom", custom_flow=(True, False))
+    assert window.settings.preferred_web_ai == "custom"
+    assert window.settings.markdown_exchange_mode is True
+    assert window.settings.textual_file_operations_mode is False
+    assert "Personalizzato" in window.status
+
+
 def test_new_settings_labels_are_translated() -> None:
     from local_ai_bridge.i18n import configure_language, tr
 
@@ -129,6 +164,8 @@ def test_new_settings_labels_are_translated() -> None:
     assert tr("Cartelle") == "Folders"
     assert tr("Interfaccia Web UI") == "Web UI"
     assert tr("Formati di scambio con AI Web") == "Web AI exchange formats"
+    assert tr("AI Web preferita") == "Preferred Web AI"
+    assert tr("Seleziona modello preferito:") == "Select preferred model:"
     assert tr("Formato dei file richiesti") == "Requested files format"
     assert tr("Formato delle modifiche proposte") == "Proposed changes format"
     configure_language("it")
@@ -205,6 +242,9 @@ def test_exchange_format_controls_are_only_in_advanced_settings() -> None:
     assert "_section('Formato delle modifiche proposte')" in settings_source
     assert "window.set_requested_files_format" in settings_source
     assert "window.set_update_format" in settings_source
+    assert "preferred_web_ai_combo" in settings_source
+    assert "window.set_preferred_web_ai" in settings_source
+    assert "simple_provider_buttons" in workflow_source
 
 
 def test_text_file_operations_labels_are_translated() -> None:
@@ -341,9 +381,17 @@ def test_primary_mode_settings_and_operations_screen_are_separate() -> None:
     assert "primary_mode_combo" in settings_source
     assert "'development'" in settings_source
     assert "'operations'" in settings_source
+    assert "def choose_initial_setup" in selection_source
     assert "def choose_initial_primary_mode" in selection_source
-    assert "Che cosa vuoi fare con BridgAI?" in selection_source
-    assert "Puoi cambiare modalità in qualsiasi momento" in selection_source
+    assert "Come vuoi usare BridgAI?" in selection_source
+    assert "Modalità di utilizzo:" in selection_source
+    assert "AI Web preferita:" in selection_source
+    assert "PREFERRED_WEB_AI_CHATGPT" in selection_source
+    assert "PREFERRED_WEB_AI_CLAUDE" in selection_source
+    assert "PREFERRED_WEB_AI_GEMINI" in selection_source
+    assert "PREFERRED_WEB_AI_CUSTOM" in selection_source
+    assert "primary_mode, preferred_web_ai = choose_initial_setup(self)" in main_source
+    assert "preferred_web_ai_exchange_formats(preferred_web_ai)" in main_source
     assert "def build_operations_tab" in operations_source
     assert "richiesta, input, piano, autorizzazioni" in operations_source
     assert "self.operations_tab = build_operations_tab(self)" in main_source
@@ -391,7 +439,9 @@ def test_primary_mode_labels_are_bilingual() -> None:
     assert tr("Modalità principale") == "Primary mode"
     assert tr("Modalità Sviluppo") == "Development Mode"
     assert tr("Modalità Operativa") == "Operations Mode"
-    assert tr("Che cosa vuoi fare con BridgAI?") == "What do you want to do with BridgAI?"
+    assert tr("Come vuoi usare BridgAI?") == "How do you want to use BridgAI?"
+    assert tr("Modalità di utilizzo:") == "Usage mode:"
+    assert tr("AI Web preferita:") == "Preferred Web AI:"
     configure_language("it")
 
 
@@ -505,4 +555,39 @@ def test_exchange_formats_expose_collapsible_web_ai_compatibility_table() -> Non
     assert "<b>Gemini Pro</b>" in settings_source
     assert "<b>Perplexity</b>" in settings_source
     assert "<b>Microsoft Copilot</b>" in settings_source
-    assert "Markdown offre la massima compatibilità generale." in settings_source
+    assert "ZIP → ZIP è il flusso consigliato ed è l’unico verificato come pienamente funzionante." in settings_source
+    assert "le patch Markdown potrebbero non essere applicabili in tutti i casi." in settings_source
+
+
+def test_preferences_can_reopen_initial_setup_wizard() -> None:
+    from local_ai_bridge.ui import application_modes, main_window
+    from local_ai_bridge.ui.tabs import settings as settings_tab
+
+    settings_source = Path(settings_tab.__file__).read_text(encoding="utf-8")
+    assert "window.reopen_initial_setup_button" in settings_source
+    assert "Avvia di nuovo la configurazione iniziale" in settings_source
+    assert "window.reopen_initial_setup" in settings_source
+
+    main_source = Path(main_window.__file__).read_text(encoding="utf-8")
+    assert "def reopen_initial_setup(self) -> None:" in main_source
+    assert "current_mode=self.settings.primary_mode" in main_source
+    assert "current_provider=self.settings.preferred_web_ai" in main_source
+    assert "allow_cancel=True" in main_source
+
+    wizard_source = Path(application_modes.__file__).read_text(encoding="utf-8")
+    assert "current_mode: str = DEVELOPMENT_MODE" in wizard_source
+    assert "current_provider: str = PREFERRED_WEB_AI_CHATGPT" in wizard_source
+    assert "if allow_cancel:" in wizard_source
+
+
+def test_reopen_initial_setup_labels_are_translated() -> None:
+    from local_ai_bridge.i18n import configure_language, tr
+
+    configure_language("en")
+    assert tr("Avvia di nuovo la configurazione iniziale") == "Run initial setup again"
+    assert (
+        tr("Rivedi le scelte iniziali senza ripristinare le altre preferenze.")
+        == "Review the initial choices without resetting other preferences."
+    )
+    assert tr("Configurazione iniziale aggiornata.") == "Initial setup updated."
+    configure_language("it")

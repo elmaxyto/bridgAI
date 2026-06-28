@@ -12,6 +12,33 @@ The format is inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0
 - Broader cross-platform GUI validation
 - Packaged desktop distributions
 
+## [1.1.0] - 2026-06-28
+
+### Added
+
+- Browser extension for the controlled report, download, and update workflow
+- Operational missions with local persistence, execution policies, results, artifacts, and desktop/Web controls
+- Configurable AI assistant settings for local Gemma/LiteRT-LM, Ollama, and cloud providers
+- Global and per-project prompts, project-specific exclusions, and related desktop/Web settings
+- Independent requested-file and update formats, including ZIP, Markdown, and complete textual file operations
+- Italian/English language selector, persistent light/dark theme, and voice dictation in the Web UI
+- Two-factor authentication with TOTP provisioning, recovery codes, replay protection, and optional private-LAN bypass
+- Git commit history integration in Super-Reports and built-in skills
+
+### Changed
+
+- Made Markdown/text uploads the primary path for textual updates while retaining legacy compatibility
+- Improved responsive Web UI navigation, mobile header layout, authentication controls, and official application branding
+- Expanded project scanning, ignore rules, report context selection, diagnostics, and testing-result interpretation
+- Strengthened browser-extension integration, remote startup configuration, and managed update handling
+- Preserved the default ZIP-to-ZIP workflow and compatibility with existing settings
+
+### Security
+
+- Added authenticated and CSRF-protected Web settings for prompts, exclusions, and update modes
+- Added rate limiting, secure proxy-aware client detection, temporary authenticated sessions, and TOTP replay protection
+- Retained strict workspace-boundary, sensitive-path, archive, and explicit-approval controls
+
 ## [1.0.0] - 2026-06-16
 
 ### Added

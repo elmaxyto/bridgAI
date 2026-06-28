@@ -84,6 +84,47 @@ def build_settings_tab(window) -> QWidget:
     window.simple_mode_check.toggled.connect(window._save_simple_mode)
     interface_layout.addWidget(window.simple_mode_check)
 
+    preferred_ai_section, preferred_ai_layout = _section('AI Web preferita')
+    preferred_ai_layout.addWidget(
+        _wrapped_label(
+            'Scegli il servizio usato normalmente nella modalità super semplice. '
+            'La preferenza viene salvata e riproposta a ogni avvio.'
+        )
+    )
+    preferred_ai_form = QFormLayout()
+    window.preferred_web_ai_combo = QComboBox()
+    window.preferred_web_ai_combo.addItem('ChatGPT', 'chatgpt')
+    window.preferred_web_ai_combo.addItem('Claude', 'claude')
+    window.preferred_web_ai_combo.addItem('Gemini', 'gemini')
+    window.preferred_web_ai_combo.addItem(_('Personalizzato'), 'custom')
+    window.preferred_web_ai_combo.currentIndexChanged.connect(
+        lambda index: window.set_preferred_web_ai(
+            window.preferred_web_ai_combo.itemData(index)
+        )
+    )
+    preferred_ai_form.addRow(_('Seleziona modello preferito:'), window.preferred_web_ai_combo)
+    preferred_ai_layout.addLayout(preferred_ai_form)
+    window.preferred_web_ai_flow_label = _wrapped_label(
+        'ChatGPT e Claude usano ZIP → ZIP; Gemini usa ZIP → File Markdown di aggiornamento. '
+        'Con Personalizzato scegli il flusso.'
+    )
+    preferred_ai_layout.addWidget(window.preferred_web_ai_flow_label)
+    wizard_row = QHBoxLayout()
+    window.reopen_initial_setup_button = _button(
+        _('Avvia di nuovo la configurazione iniziale'),
+        window.reopen_initial_setup,
+    )
+    window.reopen_initial_setup_button.setToolTip(
+        _('Rivedi le scelte iniziali senza ripristinare le altre preferenze.')
+    )
+    wizard_row.addWidget(window.reopen_initial_setup_button)
+    wizard_row.addStretch(1)
+    preferred_ai_layout.addLayout(wizard_row)
+    preferred_ai_section.setVisible(window.settings.simple_mode)
+    window.simple_mode_check.toggled.connect(preferred_ai_section.setVisible)
+    interface_layout.addWidget(preferred_ai_section)
+    window.preferred_web_ai_settings_group = preferred_ai_section
+
     window.dark_mode_check = ToggleSwitch(_('Tema scuro'))
     window.dark_mode_check.setToolTip(
         _('Usa colori scuri e ad alto contrasto in tutta l’interfaccia.')
@@ -272,8 +313,9 @@ def build_settings_tab(window) -> QWidget:
     other_models_layout = QVBoxLayout(other_models_group)
     other_models_layout.addWidget(
         _wrapped_label(
-            'Il flusso standard resta ZIP → ZIP. Cambia questi formati solo quando la Web AI '
-            'non supporta gli archivi o restituisce più facilmente un file Markdown di aggiornamento.'
+            'ZIP → ZIP è il flusso consigliato ed è l’unico verificato come pienamente funzionante. '
+            'Usa i formati Markdown solo come alternativa: soprattutto per le modifiche in modalità '
+            'patch, il risultato potrebbe non funzionare sempre.'
         )
     )
 
@@ -369,8 +411,9 @@ def build_settings_tab(window) -> QWidget:
     compatibility_layout.addWidget(compatibility_table)
     compatibility_layout.addWidget(
         _wrapped_label(
-            'Markdown offre la massima compatibilità generale. Il supporto ZIP per i file richiesti '
-            'non implica il supporto ZIP per le modifiche proposte.'
+            'ZIP → ZIP è il percorso raccomandato e testato. Le modalità Markdown aumentano la '
+            'compatibilità con alcune AI Web, ma non offrono la stessa garanzia operativa; in '
+            'particolare, le patch Markdown potrebbero non essere applicabili in tutti i casi.'
         )
     )
     compatibility_panel.setVisible(False)
@@ -428,6 +471,7 @@ def build_settings_tab(window) -> QWidget:
     window.refresh_temp_settings()
     window.refresh_ai_assistant_settings()
     window.refresh_gemini_drive_settings()
+    window.refresh_preferred_web_ai_settings()
     window.refresh_markdown_exchange_settings()
     window.refresh_textual_file_operations_settings()
     return page

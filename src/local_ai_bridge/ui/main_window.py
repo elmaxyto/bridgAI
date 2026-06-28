@@ -24,6 +24,7 @@ from local_ai_bridge.core.settings import (
     OPERATIONS_MODE,
     PRIMARY_MODES,
     SettingsStore,
+    preferred_web_ai_exchange_formats,
     app_data_dir,
 )
 from local_ai_bridge.core.skills import SkillContext, SkillRegistry
@@ -33,7 +34,7 @@ from local_ai_bridge.services.operational_missions import OperationalMissionStor
 from local_ai_bridge.web.launcher import stop_web_interface
 from local_ai_bridge.skills.builtins import register_builtin_skills
 from local_ai_bridge.ui.ai_assistant_actions import AIAssistantActionsMixin
-from local_ai_bridge.ui.application_modes import choose_initial_primary_mode
+from local_ai_bridge.ui.application_modes import choose_initial_setup
 from local_ai_bridge.ui.browser_extension_actions import BrowserExtensionActionsMixin
 from local_ai_bridge.ui.change_actions import ChangeActionsMixin
 from local_ai_bridge.ui.github_actions import GitHubActionsMixin
@@ -164,9 +165,45 @@ class MainWindow(WorkflowActionsMixin, BrowserExtensionActionsMixin, ChangeActio
     def _ensure_primary_mode(self) -> None:
         if self.settings.primary_mode in PRIMARY_MODES:
             return
-        self.settings.primary_mode = choose_initial_primary_mode(self)
+        result = choose_initial_setup(self)
+        if result is None:
+            return
+        primary_mode, preferred_web_ai = result
+        self.settings.primary_mode = primary_mode
+        self.settings.preferred_web_ai = preferred_web_ai
+        preferred_formats = preferred_web_ai_exchange_formats(preferred_web_ai)
+        if preferred_formats is not None:
+            (
+                self.settings.markdown_exchange_mode,
+                self.settings.textual_file_operations_mode,
+            ) = preferred_formats
         self.settings_store.save(self.settings)
         self.refresh_primary_mode_settings()
+        self.refresh_preferred_web_ai_settings()
+
+    def reopen_initial_setup(self) -> None:
+        result = choose_initial_setup(
+            self,
+            current_mode=self.settings.primary_mode,
+            current_provider=self.settings.preferred_web_ai,
+            allow_cancel=True,
+        )
+        if result is None:
+            return
+        primary_mode, preferred_web_ai = result
+        self.settings.primary_mode = primary_mode
+        self.settings.preferred_web_ai = preferred_web_ai
+        preferred_formats = preferred_web_ai_exchange_formats(preferred_web_ai)
+        if preferred_formats is not None:
+            (
+                self.settings.markdown_exchange_mode,
+                self.settings.textual_file_operations_mode,
+            ) = preferred_formats
+        self.settings_store.save(self.settings)
+        self.refresh_primary_mode_settings()
+        self.refresh_preferred_web_ai_settings()
+        self.apply_simple_mode()
+        self._show_status(_('Configurazione iniziale aggiornata.'))
 
     def apply_simple_mode(self) -> None:
         operations = self.settings.primary_mode == OPERATIONS_MODE

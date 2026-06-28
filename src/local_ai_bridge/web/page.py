@@ -65,6 +65,10 @@ def _power_user_settings_section() -> str:
       </div>
       <div class="settings-panel">
         <h3>Formati di scambio</h3>
+        <p class="field-help"><strong>ZIP → ZIP è il flusso consigliato ed è l’unico verificato come pienamente funzionante. Usa i formati Markdown solo come alternativa: soprattutto per le modifiche in modalità patch, il risultato potrebbe non funzionare sempre.</strong></p>
+        <label for="preferredWebAi">AI Web preferita</label>
+        <select id="preferredWebAi" onchange="applyPreferredWebAiPreset()"><option value="chatgpt">ChatGPT</option><option value="claude">Claude</option><option value="gemini">Gemini</option><option value="custom">Personalizzato</option></select>
+        <p class="field-help">ChatGPT e Claude usano ZIP → ZIP; Gemini usa ZIP → File Markdown di aggiornamento. Con Personalizzato scegli il flusso.</p>
         <label for="requestedFilesFormat">Formato dei file richiesti</label>
         <select id="requestedFilesFormat"><option value="zip">ZIP — consigliato</option><option value="markdown">Markdown — per AI senza supporto ZIP</option></select>
         <p class="field-help">Definisce cosa scarichi quando l’AI richiede file con #scarica.</p>
@@ -87,7 +91,7 @@ def _power_user_settings_section() -> str:
                 </tbody>
               </table>
             </div>
-            <p class="field-help"><strong>Markdown offre la massima compatibilità generale.</strong> Il supporto ZIP per i file richiesti non implica il supporto ZIP per le modifiche proposte.</p>
+            <p class="field-help"><strong>ZIP → ZIP è il percorso raccomandato e testato. Le modalità Markdown aumentano la compatibilità con alcune AI Web, ma non offrono la stessa garanzia operativa; in particolare, le patch Markdown potrebbero non essere applicabili in tutti i casi.</strong></p>
           </div>
         </details>
       </div>
@@ -135,9 +139,9 @@ def render_index(
 <p class="field-help">Il preset aggiunge istruzioni alla richiesta senza modificare il testo scritto.</p>
 <div class="actions"><button onclick="generateReport()">Prepara richiesta per l’AI</button><button id="automationSendButton" class="success" onclick="sendReportToAutomation()" disabled>Invia automaticamente a ChatGPT</button></div>
 <div class="provider-actions">
-  <button data-provider disabled onclick="openProvider('https://chatgpt.com/')">Continua su ChatGPT</button>
-  <button data-provider disabled onclick="openProvider('https://claude.ai/new')">Continua su Claude</button>
-  <button data-provider disabled onclick="openProvider('https://gemini.google.com/')">Continua su Gemini</button>
+  <button data-provider="chatgpt" disabled onclick="openProvider('https://chatgpt.com/')">Continua su ChatGPT</button>
+  <button data-provider="claude" disabled onclick="openProvider('https://claude.ai/new')">Continua su Claude</button>
+  <button data-provider="gemini" disabled onclick="openProvider('https://gemini.google.com/')">Continua su Gemini</button>
 </div>
 <div id="reportResult" class="feedback"></div>
 <details id="reportDetails"><summary>Mostra o copia la richiesta preparata</summary><div class="details-body">

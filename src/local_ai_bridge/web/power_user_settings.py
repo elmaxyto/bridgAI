@@ -2,6 +2,11 @@ from __future__ import annotations
 
 from typing import Any
 
+from local_ai_bridge.core.settings import (
+    PREFERRED_WEB_AI_CUSTOM,
+    PREFERRED_WEB_AI_VALUES,
+    preferred_web_ai_exchange_formats,
+)
 from local_ai_bridge.core.project_prompts import (
     load_project_ignore,
     load_project_prompt,
@@ -30,12 +35,27 @@ def _required_text(body: dict[str, Any], key: str) -> str:
     return value
 
 
+def _preferred_web_ai(body: dict[str, Any], current: str) -> str:
+    if "preferred_web_ai" not in body:
+        if (
+            "markdown_exchange_mode" in body
+            or "textual_file_operations_mode" in body
+        ):
+            return PREFERRED_WEB_AI_CUSTOM
+        return current
+    value = body.get("preferred_web_ai", current)
+    if not isinstance(value, str) or value not in PREFERRED_WEB_AI_VALUES:
+        raise ValueError("Il campo preferred_web_ai non è valido.")
+    return value
+
+
 def power_user_settings_payload(state) -> dict[str, Any]:
     with state.lock:
         workspace = state.workspace
         return {
             "include_custom_prompts": bool(state.settings.include_custom_prompts),
             "global_prompt": state.settings.global_prompt,
+            "preferred_web_ai": state.settings.preferred_web_ai,
             "markdown_exchange_mode": bool(state.settings.markdown_exchange_mode),
             "textual_file_operations_mode": bool(
                 state.settings.textual_file_operations_mode
@@ -56,14 +76,22 @@ def update_power_user_settings(state, body: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("Conferma di salvataggio power-user mancante.")
 
     include_custom_prompts = _required_bool(body, "include_custom_prompts")
-    markdown_exchange_mode = (
-        _required_bool(body, "markdown_exchange_mode")
-        if "markdown_exchange_mode" in body
-        else bool(state.settings.markdown_exchange_mode)
+    preferred_web_ai = _preferred_web_ai(
+        body,
+        state.settings.preferred_web_ai,
     )
-    textual_file_operations_mode = _required_bool(
-        body, "textual_file_operations_mode"
-    )
+    preferred_formats = preferred_web_ai_exchange_formats(preferred_web_ai)
+    if preferred_formats is None:
+        markdown_exchange_mode = (
+            _required_bool(body, "markdown_exchange_mode")
+            if "markdown_exchange_mode" in body
+            else bool(state.settings.markdown_exchange_mode)
+        )
+        textual_file_operations_mode = _required_bool(
+            body, "textual_file_operations_mode"
+        )
+    else:
+        markdown_exchange_mode, textual_file_operations_mode = preferred_formats
     global_prompt = _required_text(body, "global_prompt").strip()
     project_prompt = _required_text(body, "project_prompt")
     project_ignore = _required_text(body, "project_ignore")
@@ -82,6 +110,7 @@ def update_power_user_settings(state, body: dict[str, Any]) -> dict[str, Any]:
         latest_settings = state.settings_store.load()
         latest_settings.include_custom_prompts = include_custom_prompts
         latest_settings.global_prompt = global_prompt
+        latest_settings.preferred_web_ai = preferred_web_ai
         latest_settings.markdown_exchange_mode = markdown_exchange_mode
         latest_settings.textual_file_operations_mode = textual_file_operations_mode
         state.settings = latest_settings
