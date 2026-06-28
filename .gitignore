@@ -122,3 +122,12 @@ Desktop.ini
 # Generated BridgAI change packages and reserved ZIP metadata
 *.zip
 /commit-message.md
+/BridgAI.desktop
+BridgAI.desktop
+AGGIORNAMENTO_*.md
+/AGGIORNAMENTO_*.md
+.bridgai/
+/.bridgai/
+
+
+
