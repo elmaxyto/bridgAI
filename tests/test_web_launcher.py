@@ -148,12 +148,13 @@ def test_browser_extension_status_uses_dedicated_token(monkeypatch) -> None:
 
     captured = {}
 
-    def fake_urlopen(request, timeout):
-        captured["request"] = request
-        captured["timeout"] = timeout
-        return Response()
+    class FakeOpener:
+        def open(self, request, timeout=None):
+            captured["request"] = request
+            captured["timeout"] = timeout
+            return Response()
 
-    monkeypatch.setattr(launcher.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(launcher.urllib.request, "build_opener", lambda *args: FakeOpener())
     payload = launcher.browser_extension_service_status(8765, "t" * 40)
     assert payload["enabled"] is True
     assert captured["request"].get_header("X-bridgai-extension-token") == "t" * 40

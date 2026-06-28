@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 from local_ai_bridge.core import settings as settings_module
 from local_ai_bridge.services import browser_extension
+from local_ai_bridge.ui import browser_extension_actions
 
 
 def _use_temp_exchange(monkeypatch, tmp_path: Path) -> None:

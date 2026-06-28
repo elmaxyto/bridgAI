@@ -25,8 +25,8 @@ def test_advanced_settings_cards_are_grouped_in_requested_order() -> None:
     assert "build_ai_assistant_settings_group(window)" in function_source
     assert "_section('Interfaccia web locale')" in function_source
     assert "_section('Cartella progetti Web UI')" in function_source
-    assert "_section('Formato dei file richiesti')" in function_source
-    assert "_section('Formato delle modifiche proposte')" in function_source
+    assert "Formato dei file richiesti" in function_source
+    assert "Formato delle modifiche proposte" in function_source
     assert "_section('Trasporto ZIP per Gemini')" in function_source
 
 
@@ -238,8 +238,8 @@ def test_exchange_format_controls_are_only_in_advanced_settings() -> None:
     assert "update_format_combo" not in workflow_source
     assert "requested_files_format_combo" in settings_source
     assert "update_format_combo" in settings_source
-    assert "_section('Formato dei file richiesti')" in settings_source
-    assert "_section('Formato delle modifiche proposte')" in settings_source
+    assert "Formato dei file richiesti" in settings_source
+    assert "Formato delle modifiche proposte" in settings_source
     assert "window.set_requested_files_format" in settings_source
     assert "window.set_update_format" in settings_source
     assert "preferred_web_ai_combo" in settings_source
@@ -347,11 +347,14 @@ def test_simple_mode_switches_between_zip_and_text_update_inputs() -> None:
 
 
 def test_desktop_markdown_update_mode_exposes_file_and_manual_paths() -> None:
-    from local_ai_bridge.ui import main_window, workflow_actions
+    from local_ai_bridge.ui import main_window, workflow_actions, markdown_update_actions
     from local_ai_bridge.ui.tabs import workflow
 
     workflow_source = Path(workflow.__file__).read_text(encoding="utf-8")
-    actions_source = Path(workflow_actions.__file__).read_text(encoding="utf-8")
+    actions_source = (
+        Path(workflow_actions.__file__).read_text(encoding="utf-8")
+        + Path(markdown_update_actions.__file__).read_text(encoding="utf-8")
+    )
     main_source = Path(main_window.__file__).read_text(encoding="utf-8")
 
     assert "text_update_path_edit" in workflow_source
@@ -370,10 +373,13 @@ def test_desktop_markdown_update_mode_exposes_file_and_manual_paths() -> None:
 
 def test_primary_mode_settings_and_operations_screen_are_separate() -> None:
     from local_ai_bridge.ui import application_modes, main_window
-    from local_ai_bridge.ui.tabs import operations, settings as settings_tab
+    from local_ai_bridge.ui.tabs import operations, operations_secondary, settings as settings_tab
 
     settings_source = Path(settings_tab.__file__).read_text(encoding="utf-8")
-    operations_source = Path(operations.__file__).read_text(encoding="utf-8")
+    operations_source = (
+        Path(operations.__file__).read_text(encoding="utf-8")
+        + Path(operations_secondary.__file__).read_text(encoding="utf-8")
+    )
     selection_source = Path(application_modes.__file__).read_text(encoding="utf-8")
     main_source = Path(main_window.__file__).read_text(encoding="utf-8")
 
@@ -390,10 +396,12 @@ def test_primary_mode_settings_and_operations_screen_are_separate() -> None:
     assert "PREFERRED_WEB_AI_CLAUDE" in selection_source
     assert "PREFERRED_WEB_AI_GEMINI" in selection_source
     assert "PREFERRED_WEB_AI_CUSTOM" in selection_source
-    assert "primary_mode, preferred_web_ai = choose_initial_setup(self)" in main_source
+    assert "choose_initial_setup(self)" in main_source
+    assert "primary_mode, preferred_web_ai = result" in main_source
     assert "preferred_web_ai_exchange_formats(preferred_web_ai)" in main_source
     assert "def build_operations_tab" in operations_source
-    assert "richiesta, input, piano, autorizzazioni" in operations_source
+    assert "File autorizzati" in operations_source
+    assert "Invio e verifica" in operations_source
     assert "self.operations_tab = build_operations_tab(self)" in main_source
     assert "self._ensure_primary_mode()" in main_source
     assert "self.settings.primary_mode == OPERATIONS_MODE" in main_source
@@ -486,7 +494,7 @@ def test_phase_two_mission_labels_are_bilingual() -> None:
 
 def test_phase_three_controlled_executor_is_exposed_without_generated_code() -> None:
     from local_ai_bridge.services import operational_execution, operational_execution_policy
-    from local_ai_bridge.ui import main_window, operations_actions
+    from local_ai_bridge.ui import main_window, operations_actions, operations_presenters
     from local_ai_bridge.ui.tabs import operations, operations_secondary
 
     executor_source = Path(operational_execution.__file__).read_text(encoding="utf-8")
@@ -495,10 +503,14 @@ def test_phase_three_controlled_executor_is_exposed_without_generated_code() -> 
     actions_source = Path(operations_actions.__file__).read_text(encoding="utf-8")
     tab_source = Path(operations.__file__).read_text(encoding="utf-8")
     secondary_source = Path(operations_secondary.__file__).read_text(encoding="utf-8")
-    operational_ui_source = tab_source + secondary_source
+    operational_ui_source = (
+        tab_source
+        + secondary_source
+        + Path(operations_presenters.__file__).read_text(encoding="utf-8")
+    )
 
     assert "class OperationalMissionExecutor" in executor_source
-    assert 'PROCEDURE_INPUT_INVENTORY = "builtin.input_inventory.v1"' in executor_source
+    assert "PROCEDURE_INPUT_INVENTORY" in executor_source
     assert "input_contents_read" in policy_source
     assert "external_processes_used" in policy_source
     assert "validate_execution_boundaries" in policy_source

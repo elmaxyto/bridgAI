@@ -47,7 +47,7 @@ def read_commit_history(workspace: Path) -> list[CommitHistoryEntry]:
     """Legge tutti i commit raggiungibili, dal più recente al più vecchio."""
     entries: list[CommitHistoryEntry] = []
     for raw_record in _git_log_output(workspace).split(_RECORD_SEPARATOR):
-        record = raw_record.strip()
+        record = raw_record.strip("\r\n\t ")
         if not record:
             continue
 

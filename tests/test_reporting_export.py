@@ -140,7 +140,7 @@ def test_report_identifies_generator_version(tmp_path: Path) -> None:
     )
     report = build_super_report(tmp_path)
     assert "Versione progetto rilevata:** `9.8.7`" in report
-    assert "Generatore report:** `BridgAI 1.0.0`" in report
+    assert "Generatore report:** `BridgAI 1.1.0`" in report
 
 
 def test_download_parse_and_export(tmp_path: Path) -> None:
