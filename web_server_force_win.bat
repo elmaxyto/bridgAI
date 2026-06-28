@@ -4,20 +4,20 @@ cd /d "%~dp0"
 title BridgAI - Web Server
 
 echo ========================================
-echo   BridgAI - Avvio Diretto Server Web
+echo   BridgAI - Direct Web Server Startup
 echo ========================================
 echo.
 
 if not exist ".venv\Scripts\python.exe" (
-    echo ERRORE: Ambiente virtuale non trovato!
+    echo ERROR: Virtual environment not found!
     pause
     exit /b 1
 )
 
-:: Imposta il percorso sorgente
+:: Set source directory path
 set PYTHONPATH=src
 
-:: Lancia il server web direttamente
+:: Launch web server directly
 ".venv\Scripts\python.exe" -m local_ai_bridge.web --port 8765
 
 pause

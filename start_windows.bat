@@ -4,7 +4,7 @@ cd /d "%~dp0"
 title BridgAI
 
 echo ========================================
-echo        BridgAI - Avvio
+echo        BridgAI - Startup
 echo ========================================
 echo.
 
@@ -18,46 +18,46 @@ if not defined PYTHON_CMD (
 )
 
 if not defined PYTHON_CMD (
-    echo ERRORE: Python 3 non e' stato trovato.
-    echo Installa Python 3.11 o 3.12 e abilita "Add Python to PATH".
+    echo ERROR: Python 3 was not found.
+    echo Please install Python 3.11 or 3.12 and enable "Add Python to PATH".
     echo.
     pause
     exit /b 1
 )
 
 if not exist ".venv\Scripts\python.exe" (
-    echo [1/3] Creazione ambiente virtuale...
+    echo [1/3] Creating virtual environment...
     %PYTHON_CMD% -m venv .venv
     if errorlevel 1 goto :venv_error
 ) else (
-    echo [1/3] Ambiente virtuale gia' presente.
+    echo [1/3] Virtual environment already exists.
 )
 
-echo [2/3] Installazione o aggiornamento dipendenze...
+echo [2/3] Installing or updating dependencies...
 ".venv\Scripts\python.exe" -m pip install --disable-pip-version-check -r requirements.txt
 if errorlevel 1 goto :pip_error
 
-echo [3/3] Avvio del programma...
+echo [3/3] Launching program...
 ".venv\Scripts\python.exe" run.py
 set "APP_EXIT=%ERRORLEVEL%"
 
 if not "%APP_EXIT%"=="0" (
     echo.
-    echo Il programma si e' chiuso con codice %APP_EXIT%.
+    echo The program exited with code %APP_EXIT%.
     pause
 )
 exit /b %APP_EXIT%
 
 :venv_error
 echo.
-echo ERRORE: impossibile creare l'ambiente virtuale.
-echo Verifica che l'installazione di Python includa il modulo venv.
+echo ERROR: Failed to create the virtual environment.
+echo Make sure your Python installation includes the venv module.
 pause
 exit /b 1
 
 :pip_error
 echo.
-echo ERRORE: installazione delle dipendenze non riuscita.
-echo Controlla la connessione Internet e riprova.
+echo ERROR: Failed to install dependencies.
+echo Check your internet connection and try again.
 pause
 exit /b 1
