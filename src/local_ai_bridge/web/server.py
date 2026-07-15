@@ -3,9 +3,8 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import secrets
+import sys
 import threading
-import time
 import urllib.parse
 import webbrowser
 from http import HTTPStatus
@@ -15,37 +14,31 @@ from pathlib import Path
 from typing import Any
 
 from local_ai_bridge.services.git import GitIntegrationError
-from local_ai_bridge.web.browser_automation import dispatch_browser_automation_action
-from local_ai_bridge.web.extension_api import (
-    ExtensionResult,
-    authenticate_extension,
-    dispatch_get as dispatch_extension_get,
-    dispatch_post as dispatch_extension_post,
-)
-from local_ai_bridge.web.network import connection_status_payload
-from local_ai_bridge.web.page import render_favicon_svg, render_index, render_manifest
-from local_ai_bridge.web.power_user_settings import (
-    power_user_settings_payload,
-    update_power_user_settings,
-)
-from local_ai_bridge.web.project_actions import (
-    dispatch_project_action,
-    project_status_payload,
-    resolve_startup_workspace_root,
-)
+from local_ai_bridge.web.network import local_ipv4_addresses
+from local_ai_bridge.web.project_actions import resolve_startup_workspace_root
 from local_ai_bridge.web.security import (
     AuthenticationRateLimitError,
     WebSecurityConfig,
     client_address_from_proxy,
-    is_loopback_address,
+)
+from local_ai_bridge.web.server_routes import (
+    MAX_JSON_BODY_BYTES,
+    RouteResponse,
+    dispatch_get_request,
+    dispatch_post_request,
 )
 from local_ai_bridge.web.state import BridgeState
 
-MAX_JSON_BODY_BYTES = 2_000_000
-MAX_UPLOAD_BYTES = 100 * 1024 * 1024
-
 
 def _application_version() -> str:
+    try:
+        from local_ai_bridge import __version__ as package_version
+    except ImportError:
+        package_version = ""
+
+    if isinstance(package_version, str) and package_version.strip():
+        return package_version.strip()
+
     try:
         return version("local-ai-bridge")
     except PackageNotFoundError:
@@ -55,20 +48,15 @@ def _application_version() -> str:
 APPLICATION_VERSION = _application_version()
 
 
-def _safe_upload_name(value: str | None) -> str:
-    raw = urllib.parse.unquote(value or "update.zip")
-    name = Path(raw).name.replace("\x00", "").strip() or "update.zip"
-    if Path(name).suffix.lower() != ".zip":
-        raise ValueError("È possibile caricare soltanto un file ZIP.")
-    return name
+_CLIENT_DISCONNECT_WINERRORS = {10053, 10054, 10058}
 
 
-def _safe_markdown_upload_name(value: str | None) -> str:
-    raw = urllib.parse.unquote(value or "bridgai-update.md")
-    name = Path(raw).name.replace("\x00", "").strip() or "bridgai-update.md"
-    if Path(name).suffix.casefold() not in {".md", ".txt"}:
-        raise ValueError("È possibile caricare soltanto file .md o .txt.")
-    return name
+def _is_client_disconnect(exc: BaseException) -> bool:
+    """Return True when the peer closed the HTTP connection mid-response."""
+    return isinstance(
+        exc,
+        (BrokenPipeError, ConnectionAbortedError, ConnectionResetError),
+    ) or getattr(exc, "winerror", None) in _CLIENT_DISCONNECT_WINERRORS
 
 
 class BridgeHandler(BaseHTTPRequestHandler):
@@ -83,9 +71,6 @@ class BridgeHandler(BaseHTTPRequestHandler):
             self.headers.get("X-Forwarded-For"),
             self.headers.get("X-Real-IP"),
         )
-
-    def _is_local_client(self) -> bool:
-        return self._client_ip() in {"127.0.0.1", "::1"}
 
     def _send_security_headers(self) -> None:
         self.send_header("Cache-Control", "no-store")
@@ -154,14 +139,6 @@ class BridgeHandler(BaseHTTPRequestHandler):
             raise ValueError("Il corpo JSON deve essere un oggetto.")
         return value
 
-    def _require_api_access(self, *, write: bool = False) -> None:
-        if not self.server.state.accepts_api_authorization(
-            self.headers.get("Authorization"), self._client_ip()
-        ):
-            raise PermissionError("Autenticazione non valida, incompleta o scaduta.")
-        if write and self.headers.get("X-Local-Bridge-CSRF") != self.server.state.csrf_token:
-            raise PermissionError("Token CSRF non valido.")
-
     def _send_artifact(self, artifact_id: str, *, extension: bool = False) -> None:
         artifact = self.server.state.get_artifact(artifact_id)
         size = artifact.path.stat().st_size
@@ -178,32 +155,50 @@ class BridgeHandler(BaseHTTPRequestHandler):
             while chunk := stream.read(1024 * 128):
                 self.wfile.write(chunk)
 
-    def _require_extension_access(self):
-        client_ip = self._client_ip()
-        direct_is_loopback = is_loopback_address(self.client_address[0])
-        forwarded_proto = self.headers.get("X-Forwarded-Proto") or ""
-        proxy_reports_https = (
-            direct_is_loopback
-            and forwarded_proto.rsplit(",", 1)[-1].strip().lower() == "https"
-        )
-        extension_client_ip = client_ip
-        if proxy_reports_https and is_loopback_address(client_ip):
-            extension_client_ip = "reverse-proxy-client"
-        return authenticate_extension(
-            extension_client_ip,
-            self.headers,
-            secure_transport=(
-                is_loopback_address(extension_client_ip) or proxy_reports_https
-            ),
-        )
-
-    def _send_extension_result(self, result: ExtensionResult) -> None:
-        if result.kind == "artifact":
-            self._send_artifact(result.artifact_id, extension=True)
+    def _send_route_response(self, response: RouteResponse) -> None:
+        if response.kind == "json":
+            self._json(
+                response.status,
+                response.payload or {},
+                extension=response.extension,
+            )
             return
-        self._json(HTTPStatus.OK, result.payload or {}, extension=True)
+        if response.kind == "html":
+            self._html(str(response.body))
+            return
+        if response.kind == "artifact":
+            self._send_artifact(response.artifact_id, extension=response.extension)
+            return
+        if response.kind == "bytes":
+            data = (
+                response.body
+                if isinstance(response.body, bytes)
+                else str(response.body).encode("utf-8")
+            )
+            self.send_response(response.status)
+            self.send_header("Content-Type", response.content_type)
+            self.send_header("Content-Length", str(len(data)))
+            if response.security:
+                self._send_security_headers()
+            for key, value in response.headers:
+                self.send_header(key, value)
+            if response.extension:
+                self._send_extension_headers()
+            self.end_headers()
+            self.wfile.write(data)
+            return
+        raise ValueError(f"Tipo risposta non supportato: {response.kind}")
 
     def do_OPTIONS(self) -> None:
+        try:
+            self._do_OPTIONS()
+        except OSError as exc:
+            if _is_client_disconnect(exc):
+                self.close_connection = True
+                return
+            raise
+
+    def _do_OPTIONS(self) -> None:
         if not urllib.parse.urlsplit(self.path).path.startswith("/api/extension/"):
             self.send_response(HTTPStatus.NOT_FOUND)
             self.end_headers()
@@ -214,92 +209,27 @@ class BridgeHandler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def do_GET(self) -> None:
-        parsed = urllib.parse.urlsplit(self.path)
-        parsed_path = parsed.path
         try:
-            if parsed.path == "/":
-                connection = connection_status_payload(
-                    bind_host=str(self.server.server_address[0]),
-                    port=int(self.server.server_address[1]),
-                    remote_mode=self.server.state.security.remote_mode,
-                    host_header=self.headers.get("Host"),
-                )
-                self._html(
-                    render_index(
-                        self.server.state.csrf_token,
-                        APPLICATION_VERSION,
-                        connection_address=connection["connection_address"],
-                    )
-                )
+            self._do_GET()
+        except OSError as exc:
+            if _is_client_disconnect(exc):
+                self.close_connection = True
                 return
-            if parsed.path == "/favicon.svg":
-                data = render_favicon_svg().encode("utf-8")
-                self.send_response(HTTPStatus.OK)
-                self.send_header("Content-Type", "image/svg+xml; charset=utf-8")
-                self.send_header("Content-Length", str(len(data)))
-                self.send_header("Cache-Control", "public, max-age=86400")
-                self.send_header("X-Content-Type-Options", "nosniff")
-                self.end_headers()
-                self.wfile.write(data)
-                return
-            if parsed.path == "/manifest.webmanifest":
-                data = render_manifest(APPLICATION_VERSION).encode("utf-8")
-                self.send_response(HTTPStatus.OK)
-                self.send_header("Content-Type", "application/manifest+json; charset=utf-8")
-                self.send_header("Content-Length", str(len(data)))
-                self._send_security_headers()
-                self.end_headers()
-                self.wfile.write(data)
-                return
+            raise
 
-            if parsed.path.startswith("/api/extension/"):
-                settings = self._require_extension_access()
-                result = dispatch_extension_get(
-                    parsed.path,
-                    self.server.state,
-                    settings,
-                    application_version=APPLICATION_VERSION,
-                )
-                self._send_extension_result(result)
-                return
-
-            if parsed.path == "/api/auth/info":
-                self._json(HTTPStatus.OK, self.server.state.auth_info(self._client_ip()))
-                return
-
-            self._require_api_access()
-            if parsed.path == "/api/power-user/settings":
-                self._json(
-                    HTTPStatus.OK,
-                    power_user_settings_payload(self.server.state),
-                )
-                return
-            if parsed.path == "/api/status":
-                payload = project_status_payload(self.server.state, APPLICATION_VERSION)
-                payload.update(self.server.state.auth_info(self._client_ip()))
-                payload["markdown_exchange_mode"] = bool(
-                    self.server.state.settings.markdown_exchange_mode
-                )
-                payload["preferred_web_ai"] = (
-                    self.server.state.settings.preferred_web_ai
-                )
-                payload["textual_file_operations_mode"] = bool(
-                    self.server.state.settings.textual_file_operations_mode
-                )
-                payload.update(
-                    connection_status_payload(
-                        bind_host=str(self.server.server_address[0]),
-                        port=int(self.server.server_address[1]),
-                        remote_mode=self.server.state.security.remote_mode,
-                        host_header=self.headers.get("Host"),
-                    )
-                )
-                self._json(HTTPStatus.OK, payload)
-                return
-            if parsed.path.startswith("/api/artifacts/"):
-                self._send_artifact(parsed.path.rsplit("/", 1)[-1])
-                return
-            self._json(HTTPStatus.NOT_FOUND, {"error": "Risorsa non trovata."})
+    def _do_GET(self) -> None:
+        parsed_path = urllib.parse.urlsplit(self.path).path
+        try:
+            response = dispatch_get_request(
+                parsed_path,
+                self.server.state,
+                self.server.server_address,
+                self.headers,
+                self._client_ip(),
+                self.client_address[0],
+                APPLICATION_VERSION,
+            )
+            self._send_route_response(response)
         except PermissionError as exc:
             self._json(
                 HTTPStatus.UNAUTHORIZED,
@@ -312,6 +242,14 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 {"error": str(exc)},
                 extension=parsed_path.startswith("/api/extension/"),
             )
+        except OSError as exc:
+            if _is_client_disconnect(exc):
+                raise
+            self._json(
+                HTTPStatus.INTERNAL_SERVER_ERROR,
+                {"error": f"{type(exc).__name__}: {exc}"},
+                extension=parsed_path.startswith("/api/extension/"),
+            )
         except Exception as exc:
             self._json(
                 HTTPStatus.INTERNAL_SERVER_ERROR,
@@ -320,54 +258,28 @@ class BridgeHandler(BaseHTTPRequestHandler):
             )
 
     def do_POST(self) -> None:
+        try:
+            self._do_POST()
+        except OSError as exc:
+            if _is_client_disconnect(exc):
+                self.close_connection = True
+                return
+            raise
+
+    def _do_POST(self) -> None:
         parsed_path = urllib.parse.urlsplit(self.path).path
         try:
-            if parsed_path.startswith("/api/extension/"):
-                settings = self._require_extension_access()
-                result = dispatch_extension_post(
-                    parsed_path,
-                    self.server.state,
-                    settings,
-                    headers=self.headers,
-                    read_json=self._read_json,
-                    read_body=self._read_body,
-                    maximum_upload_bytes=MAX_UPLOAD_BYTES,
-                )
-                self._send_extension_result(result)
-                return
-            if parsed_path == "/api/auth/login":
-                if self.headers.get("X-Local-Bridge-CSRF") != self.server.state.csrf_token:
-                    raise PermissionError("Token CSRF non valido.")
-                body = self._read_json()
-                session = self.server.state.create_auth_session(
-                    self.headers.get("Authorization"),
-                    str(body.get("second_factor", "")),
-                    self._client_ip(),
-                )
-                self._json(
-                    HTTPStatus.OK,
-                    {
-                        "session_token": session.token,
-                        "expires_in": int(session.expires_at - time.monotonic()),
-                        "second_factor": session.second_factor,
-                    },
-                )
-                return
-            if parsed_path == "/api/auth/logout":
-                if self.headers.get("X-Local-Bridge-CSRF") != self.server.state.csrf_token:
-                    raise PermissionError("Token CSRF non valido.")
-                self.server.state.revoke_auth_session(self.headers.get("Authorization"))
-                self._json(HTTPStatus.OK, {"message": "Sessione terminata."})
-                return
-
-            self._require_api_access(write=True)
-            if parsed_path == "/api/zip/upload":
-                payload = self._upload_zip()
-            elif parsed_path == "/api/markdown/upload":
-                payload = self._upload_markdown_update()
-            else:
-                payload = self._dispatch(parsed_path, self._read_json())
-            self._json(HTTPStatus.OK, payload)
+            response = dispatch_post_request(
+                parsed_path,
+                self.server.state,
+                self.headers,
+                self._client_ip(),
+                self.client_address[0],
+                APPLICATION_VERSION,
+                self._read_json,
+                self._read_body,
+            )
+            self._send_route_response(response)
         except AuthenticationRateLimitError as exc:
             self._json(HTTPStatus.TOO_MANY_REQUESTS, {"error": str(exc)})
         except PermissionError as exc:
@@ -382,101 +294,20 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 {"error": str(exc)},
                 extension=parsed_path.startswith("/api/extension/"),
             )
+        except OSError as exc:
+            if _is_client_disconnect(exc):
+                raise
+            self._json(
+                HTTPStatus.INTERNAL_SERVER_ERROR,
+                {"error": f"{type(exc).__name__}: {exc}"},
+                extension=parsed_path.startswith("/api/extension/"),
+            )
         except Exception as exc:
             self._json(
                 HTTPStatus.INTERNAL_SERVER_ERROR,
                 {"error": f"{type(exc).__name__}: {exc}"},
                 extension=parsed_path.startswith("/api/extension/"),
             )
-
-    def _upload_zip(self) -> dict[str, Any]:
-        state = self.server.state
-        workspace = state.require_workspace()
-        filename = _safe_upload_name(self.headers.get("X-File-Name"))
-        raw = self._read_body(MAX_UPLOAD_BYTES)
-        if not raw:
-            raise ValueError("Il file ZIP è vuoto.")
-        from local_ai_bridge.services.archive import inspect_zip
-        from local_ai_bridge.services.temp_storage import managed_subdir
-
-        imports = managed_subdir(state.settings.temp_directory, "imports")
-        target = imports / f"{secrets.token_hex(8)}_{filename}"
-        target.write_bytes(raw)
-        try:
-            plan = inspect_zip(workspace, target)
-        except Exception:
-            target.unlink(missing_ok=True)
-            raise
-        plan_id = state.register_plan(plan)
-        from local_ai_bridge.web.bridge_actions import _plan_payload
-        return _plan_payload(state, plan_id)
-
-    def _upload_markdown_update(self) -> dict[str, Any]:
-        state = self.server.state
-        workspace = state.require_workspace()
-        if not state.settings.textual_file_operations_mode:
-            raise ValueError(
-                "Il formato aggiornamenti attivo è ZIP. Seleziona File Markdown nelle impostazioni."
-            )
-        _safe_markdown_upload_name(self.headers.get("X-File-Name"))
-        raw = self._read_body(MAX_UPLOAD_BYTES)
-        if not raw:
-            raise ValueError("Il file Markdown di aggiornamento è vuoto.")
-        try:
-            text = raw.decode("utf-8-sig")
-        except UnicodeDecodeError as exc:
-            raise ValueError(
-                "Il file Markdown di aggiornamento non è codificato in UTF-8."
-            ) from exc
-        if not text.strip():
-            raise ValueError("Il file Markdown di aggiornamento è vuoto.")
-
-        from local_ai_bridge.services.text_file_operations import (
-            inspect_text_file_operations,
-        )
-
-        plan = inspect_text_file_operations(workspace, text)
-        plan_id = state.register_plan(plan)
-        from local_ai_bridge.web.bridge_actions import _plan_payload
-        return _plan_payload(state, plan_id)
-
-    def _dispatch(self, path: str, body: dict[str, Any]) -> dict[str, Any]:
-        state = self.server.state
-        project_payload = dispatch_project_action(state, path, body)
-        if project_payload is not None:
-            return project_payload
-
-        if path == "/api/restart":
-            def perform_restart():
-                import time
-                import os
-                from local_ai_bridge.services.system import build_restart_command
-
-                time.sleep(0.5)
-                try:
-                    cmd = build_restart_command()
-                    os.chdir(cmd.working_directory)
-                    os.execv(cmd.program, [cmd.program] + cmd.arguments)
-                except Exception as exc:
-                    print(f"Errore durante il riavvio: {exc}", flush=True)
-                    os._exit(1)
-
-            threading.Thread(target=perform_restart, daemon=True).start()
-            return {"message": "Riavvio in corso..."}
-
-        automation_payload = dispatch_browser_automation_action(state, path, body)
-        if automation_payload is not None:
-            return automation_payload
-
-        if path == "/api/power-user/settings":
-            return update_power_user_settings(state, body)
-
-        from local_ai_bridge.web.bridge_actions import dispatch_bridge_action
-        payload = dispatch_bridge_action(state, path, body, self._client_ip())
-        if payload is not None:
-            return payload
-
-        raise ValueError("Endpoint non supportato.")
 
 
 class BridgeHTTPServer(ThreadingHTTPServer):
@@ -485,6 +316,12 @@ class BridgeHTTPServer(ThreadingHTTPServer):
     def __init__(self, address: tuple[str, int], state: BridgeState) -> None:
         super().__init__(address, BridgeHandler)
         self.state = state
+
+    def handle_error(self, request: Any, client_address: tuple[str, int]) -> None:
+        exc = sys.exc_info()[1]
+        if exc is not None and _is_client_disconnect(exc):
+            return
+        super().handle_error(request, client_address)
 
 
 def serve(
@@ -522,14 +359,19 @@ def serve(
     url = f"http://{browser_host}:{server.server_address[1]}/"
     print(f"BridgAI Web {APPLICATION_VERSION}: {url}")
     if host in {"0.0.0.0", "::"} or security.remote_mode:
-        from local_ai_bridge.web.network import local_ipv4_addresses
         for ip in local_ipv4_addresses():
             print(f"  Rete locale: http://{ip}:{server.server_address[1]}/")
     if security.remote_mode:
         if security.requires_authentication:
-            print("Accesso remoto attivo: usa HTTPS tramite VPN o reverse proxy; il server integrato non cifra il traffico.")
+            print(
+                "Accesso remoto attivo: usa HTTPS tramite VPN o reverse proxy; "
+                "il server integrato non cifra il traffico."
+            )
         else:
-            print("Accesso dalla rete locale SENZA autenticazione. Tutti i dispositivi nella stessa rete possono accedere.")
+            print(
+                "Accesso dalla rete locale SENZA autenticazione. Tutti i dispositivi "
+                "nella stessa rete possono accedere."
+            )
     print("Interrompi con Ctrl+C.")
     if open_browser:
         threading.Timer(0.4, lambda: webbrowser.open(url)).start()
@@ -562,9 +404,9 @@ def main() -> int:
     username = os.environ.get("BRIDGAI_WEB_USERNAME")
     password_hash = os.environ.get("BRIDGAI_WEB_PASSWORD_HASH")
     totp_secret = os.environ.get("BRIDGAI_WEB_TOTP_SECRET")
-    totp_local_bypass = os.environ.get("BRIDGAI_WEB_TOTP_LOCAL_BYPASS", "").strip().lower() in {
-        "1", "true", "yes", "on"
-    }
+    totp_local_bypass = os.environ.get(
+        "BRIDGAI_WEB_TOTP_LOCAL_BYPASS", ""
+    ).strip().lower() in {"1", "true", "yes", "on"}
     workspace_root = args.workspace_root or os.environ.get("BRIDGAI_WORKSPACE_ROOT")
     serve(
         args.host,

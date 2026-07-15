@@ -122,7 +122,7 @@ def add_advanced_tools(window, layout: QVBoxLayout) -> None:
             _("Esecuzione controllata"),
             _(
                 "Usa procedure locali predefinite per produrre risultati senza modificare "
-                "gli originali. Non è il flusso principale della Modalità Operativa."
+                "gli originali. Non è il flusso principale dell’Assistente Attività AI."
             ),
         )
     )

@@ -7,15 +7,24 @@ from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import QFileDialog, QListWidgetItem, QMessageBox
 
 from local_ai_bridge.i18n import tr as _
+from local_ai_bridge.core.superpowers import (
+    MarkdownSuperpower,
+    get_superpower,
+    list_superpower_summaries,
+    rebuild_superpower_index,
+    superpower_index_exists,
+)
 from local_ai_bridge.services.operational_execution import (
     EXECUTION_COMPLETED,
     OperationalExecutionRecord,
 )
+from local_ai_bridge.services.operational_catalog import operational_superpower_allowed
 from local_ai_bridge.services.operational_missions import (
     CATEGORY_CUSTOM,
     MISSION_ARCHIVED,
     MISSION_DRAFT,
     MISSION_READY,
+    MISSION_RUNNING,
     PROCEDURE_CSV_MERGE,
     PROCEDURE_WEB_MISSION,
     PROVIDER_CHATGPT,
@@ -39,6 +48,64 @@ from local_ai_bridge.ui.operations_web_actions import OperationsWebActionsMixin
 
 
 class OperationsActionsMixin(OperationsWebActionsMixin):
+
+    def ensure_operational_superpower_index(self) -> None:
+        workspace = Path(self.workspace) if self.workspace else None
+        if workspace is None:
+            self.refresh_operational_superpowers()
+            return
+        if superpower_index_exists(workspace):
+            self.refresh_operational_superpowers()
+            return
+        self.refresh_operational_superpowers()
+        self._run_background(
+            lambda: rebuild_superpower_index(workspace),
+            lambda _path: self.refresh_operational_superpowers(),
+            _("Indicizzazione dei metodi di lavoro…"),
+        )
+
+    def refresh_operational_superpowers(self, _value=None) -> None:
+        if not hasattr(self, "operations_superpower_combo"):
+            return
+        workspace = Path(self.workspace) if self.workspace else None
+        sector = self._selected_operational_category()
+        refresh_key = (str(workspace.resolve()) if workspace is not None else "", sector)
+        items = [
+            item for item in (
+                list_superpower_summaries(workspace, rebuild_if_missing=False)
+                if workspace is not None else []
+            )
+            if operational_superpower_allowed(sector, item)
+        ]
+        selected = self.operations_superpower_combo.currentData()
+        self.operations_superpower_combo.blockSignals(True)
+        self.operations_superpower_combo.clear()
+        self.operations_superpower_combo.addItem(_("Automatico (consigliato)"), "")
+        for item in items:
+            self.operations_superpower_combo.addItem(item.title, item.superpower_id)
+        index = self.operations_superpower_combo.findData(selected)
+        self.operations_superpower_combo.setCurrentIndex(index if index >= 0 else 0)
+        self.operations_superpower_combo.blockSignals(False)
+        self._operations_superpower_refresh_key = refresh_key
+
+    def _ensure_operational_superpowers_current(self) -> None:
+        workspace = Path(self.workspace) if self.workspace else None
+        sector = self._selected_operational_category()
+        refresh_key = (str(workspace.resolve()) if workspace is not None else "", sector)
+        if getattr(self, "_operations_superpower_refresh_key", None) != refresh_key:
+            self.refresh_operational_superpowers()
+
+    def _selected_operational_superpower(self) -> MarkdownSuperpower | None:
+        workspace = Path(self.workspace) if self.workspace else None
+        selected_id = (
+            self.operations_superpower_combo.currentData()
+            if hasattr(self, "operations_superpower_combo")
+            else ""
+        )
+        if workspace is None or not selected_id:
+            return None
+        return get_superpower(workspace, str(selected_id))
+
     def _selected_operational_category(self) -> str:
         value = self.operations_category_combo.currentData()
         return str(value or CATEGORY_CUSTOM)
@@ -96,48 +163,27 @@ class OperationsActionsMixin(OperationsWebActionsMixin):
     def _refresh_operational_draft_state(self, _value=None) -> None:
         if not hasattr(self, "operations_draft_state_label"):
             return
-        inputs = self._operational_input_paths()
-        ready = bool(
-            self.operations_request_edit.toPlainText().strip()
-            and inputs
-            and self.operations_output_edit.text().strip()
-        )
+        self._ensure_operational_superpowers_current()
+        request = self.operations_request_edit.toPlainText().strip()
+        ready = bool(request)
         self.operations_draft_state_label.setText(
-            state_label(MISSION_READY if ready else MISSION_DRAFT)
+            _("Pronto per aprire l’AI") if ready else _("Aggiungi una descrizione per continuare")
         )
         visual_state = "ready" if ready else "draft"
         if self.operations_draft_state_label.property("state") != visual_state:
             self.operations_draft_state_label.setProperty("state", visual_state)
-            self.operations_draft_state_label.style().unpolish(
-                self.operations_draft_state_label
-            )
-            self.operations_draft_state_label.style().polish(
-                self.operations_draft_state_label
-            )
-        if hasattr(self, "operations_input_count_label"):
-            self.operations_input_count_label.setText(
-                _("Input selezionati: {count}").format(count=len(inputs))
-            )
+            self.operations_draft_state_label.style().unpolish(self.operations_draft_state_label)
+            self.operations_draft_state_label.style().polish(self.operations_draft_state_label)
         if hasattr(self, "operations_start_button"):
             self.operations_start_button.setEnabled(ready)
-        local_tools = bool(
-            hasattr(self, "operations_local_tools_group")
-            and self.operations_local_tools_group.isChecked()
+        superpower = self._selected_operational_superpower()
+        approach = superpower.title if superpower is not None else _("Intervista guidata")
+        self.operations_plan_edit.setPlainText(
+            _("BridgAI preparerà il prompt “{approach}”. L’AI comprenderà l’obiettivo, "
+              "chiederà soltanto i materiali necessari e poi produrrà il risultato.").format(
+                approach=approach
+            )
         )
-        if local_tools:
-            plan = draft_plan(
-                self._selected_operational_procedure(),
-                len(inputs),
-                self.operations_output_edit.text().strip(),
-            )
-        else:
-            plan = web_plan(
-                self._selected_operational_category(),
-                self._selected_operational_provider(),
-                len(inputs),
-                self.operations_output_edit.text().strip(),
-            )
-        self.operations_plan_edit.setPlainText(plan)
 
     def clear_operational_mission_form(self) -> None:
         self.operations_title_edit.clear()
@@ -145,6 +191,7 @@ class OperationsActionsMixin(OperationsWebActionsMixin):
         self.operations_input_list.clear()
         self.operations_output_edit.clear()
         self.operations_category_combo.setCurrentIndex(0)
+        self.refresh_operational_superpowers()
         self.operations_provider_combo.setCurrentIndex(0)
         self._refresh_operational_draft_state()
         self.operations_request_edit.setFocus()
@@ -157,11 +204,23 @@ class OperationsActionsMixin(OperationsWebActionsMixin):
         return request[:72] or category_label(self._selected_operational_category())
 
     def _create_operational_mission(self, *, procedure_id: str) -> OperationalMission:
+        request = self.operations_request_edit.toPlainText().strip()
+        superpower = None
+        if procedure_id == PROCEDURE_WEB_MISSION:
+            superpower = self._selected_operational_superpower()
+            if superpower is not None:
+                request = (
+                    f"{request}\n\n"
+                    f"Approccio operativo: {superpower.title} "
+                    f"(@superpower:{superpower.superpower_id})\n\n"
+                    f"{superpower.instructions}"
+                )
         return self.mission_store.create(
             title=self._operational_title(),
-            original_request=self.operations_request_edit.toPlainText(),
+            original_request=request,
             procedure_id=procedure_id,
-            work_category=self._selected_operational_category(),
+            work_category=self._selected_operational_category() or CATEGORY_CUSTOM,
+            superpower_id=superpower.superpower_id if superpower is not None else "",
             provider=self._selected_operational_provider(),
             workspace=self.workspace,
             input_paths=self._operational_input_paths(),

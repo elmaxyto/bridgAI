@@ -4,6 +4,11 @@ from pathlib import Path
 from typing import Any
 
 from local_ai_bridge.core.settings import SettingsStore
+from local_ai_bridge.services.reporting import create_batch_project_reports_zip
+from local_ai_bridge.core.project_notes import (
+    delete_project_note, load_project_notes, project_note_payload, upsert_project_note,
+)
+from local_ai_bridge.core.superpowers import delete_superpower, list_superpowers, save_superpower, superpower_payload
 
 
 def resolve_startup_workspace_root(
@@ -32,7 +37,46 @@ def project_status_payload(state, version: str) -> dict[str, Any]:
     }
 
 
+
 def dispatch_project_action(state, path: str, body: dict[str, Any]) -> dict[str, Any] | None:
+    if path == "/api/project-notes/list":
+        workspace = state.require_workspace()
+        return {"items": [project_note_payload(item) for item in load_project_notes(workspace)]}
+
+    if path == "/api/project-notes/save":
+        workspace = state.require_workspace()
+        upsert_project_note(
+            workspace,
+            note_id=str(body.get("id", "")),
+            title=str(body.get("title", "")),
+            content=str(body.get("content", "")),
+            todo=bool(body.get("todo", False)),
+            completed=bool(body.get("completed", False)),
+        )
+        return {"items": [project_note_payload(item) for item in load_project_notes(workspace)]}
+
+    if path == "/api/project-notes/delete":
+        workspace = state.require_workspace()
+        delete_project_note(workspace, str(body.get("id", "")))
+        return {"items": [project_note_payload(item) for item in load_project_notes(workspace)]}
+
+    if path == "/api/superpowers/list":
+        return {"items": [superpower_payload(item) for item in list_superpowers()]}
+
+    if path == "/api/superpowers/save":
+        save_superpower(
+            str(body.get("id", "")),
+            str(body.get("title", "")),
+            str(body.get("markdown", "")),
+            description=str(body.get("description", "")),
+            category=str(body.get("category", "Generale")),
+        )
+        return {"items": [superpower_payload(item) for item in list_superpowers()]}
+
+    if path == "/api/superpowers/delete":
+        delete_superpower(str(body.get("id", "")))
+        return {"items": [superpower_payload(item) for item in list_superpowers()]}
+
     if path == "/api/workspace":
         workspace = state.set_workspace(str(body.get("path", "")))
         return {"workspace": str(workspace)}
@@ -42,6 +86,29 @@ def dispatch_project_action(state, path: str, body: dict[str, Any]) -> dict[str,
             "La modifica della cartella root dei progetti è bloccata nella Web UI: "
             "può essere eseguita solo dalle Impostazioni del programma BridgAI."
         )
+
+
+    if path == "/api/projects/batch-report":
+        if body.get("confirm") != "BATCH_REPORT":
+            raise ValueError("Conferma report batch mancante.")
+        projects_root = state.require_project_root()
+        result = create_batch_project_reports_zip(
+            projects_root,
+            task=str(body.get("task", "") or "Report batch del progetto."),
+            settings=state.settings,
+        )
+        artifact = state.register_artifact(
+            result.path,
+            filename=result.path.name,
+            content_type="application/zip",
+        )
+        return {
+            "artifact_id": artifact.artifact_id,
+            "filename": artifact.filename,
+            "path": str(result.path),
+            "projects": result.projects,
+            "count": len(result.projects),
+        }
 
     if path == "/api/projects/create":
         if body.get("confirm") != "CREATE":

@@ -1,9 +1,9 @@
 {
   "manifest_version": 3,
   "name": "BridgAI Browser Automation",
-  "version": "0.5.0",
+  "version": "0.6.5",
   "minimum_chrome_version": "120",
-  "description": "Automazione opzionale del flusso tra BridgAI e ChatGPT.",
+  "description": "Automazione opzionale del flusso tra BridgAI, ChatGPT, Claude e Gemini.",
   "permissions": [
     "storage",
     "tabs",
@@ -15,7 +15,12 @@
     "http://127.0.0.1/*",
     "http://localhost/*",
     "https://chatgpt.com/*",
-    "https://*.oaiusercontent.com/*"
+    "https://*.oaiusercontent.com/*",
+    "https://claude.ai/*",
+    "https://*.claude.ai/*",
+    "https://*.anthropic.com/*",
+    "https://gemini.google.com/*",
+    "https://*.googleusercontent.com/*"
   ],
   "background": {
     "service_worker": "background.js"
@@ -23,9 +28,12 @@
   "content_scripts": [
     {
       "matches": [
-        "https://chatgpt.com/*"
+        "https://chatgpt.com/*",
+        "https://claude.ai/*",
+        "https://gemini.google.com/*"
       ],
       "js": [
+        "providers.js",
         "content.js"
       ],
       "run_at": "document_idle"

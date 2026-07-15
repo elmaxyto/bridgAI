@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -159,6 +160,62 @@ def test_switch_github_account_is_noninteractive(monkeypatch) -> None:
     ]]
 
 
+def test_github_commit_identity_uses_active_account_and_id_noreply(monkeypatch) -> None:
+    monkeypatch.setattr(github_service, "github_cli_available", lambda: True)
+    monkeypatch.setattr(
+        github_service,
+        "_run_command",
+        lambda command, **kwargs: '{"login":"octocat","name":"The Octocat","id":583231}',
+    )
+
+    assert github_service._github_commit_identity() == (
+        "The Octocat",
+        "583231+octocat@users.noreply.github.com",
+    )
+
+
+def test_ensure_git_author_identity_only_fills_missing_fields(
+    tmp_path: Path, monkeypatch
+) -> None:
+    calls: list[list[str]] = []
+    monkeypatch.setattr(
+        git_service,
+        "git_author_identity",
+        lambda workspace: (None, "configured@example.com"),
+    )
+    monkeypatch.setattr(
+        git_service,
+        "_run_command",
+        lambda command, **kwargs: calls.append(command) or "ok",
+    )
+
+    output = git_service.ensure_git_author_identity(
+        tmp_path,
+        name="Octocat",
+        email="583231+octocat@users.noreply.github.com",
+    )
+
+    assert calls == [["git", "config", "--local", "user.name", "Octocat"]]
+    assert output == "Identità autore Git configurata localmente: nome."
+
+
+def test_ensure_github_commit_identity_preserves_existing_git_identity(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setattr(
+        github_service,
+        "git_author_identity",
+        lambda workspace: ("Existing Author", "existing@example.com"),
+    )
+    monkeypatch.setattr(
+        github_service,
+        "_github_commit_identity",
+        lambda: pytest.fail("GitHub profile must not be queried"),
+    )
+
+    assert github_service.ensure_github_commit_identity(tmp_path) == ""
+
+
 def test_generate_commit_message_uses_real_changes_and_session_note(tmp_path: Path, monkeypatch) -> None:
     from types import SimpleNamespace
     from local_ai_bridge.services import git as git_service
@@ -241,6 +298,11 @@ def test_publish_or_update_creates_commit_repository_and_pushes(tmp_path: Path, 
     monkeypatch.setattr(github_service, "list_github_accounts", lambda: ["alice"])
     monkeypatch.setattr(github_service, "_current_changes", lambda workspace: [("modify", "src/app.py")])
     monkeypatch.setattr(github_service, "generate_commit_message", lambda workspace, session_manager=None: "feat: update app")
+    monkeypatch.setattr(
+        github_service,
+        "ensure_github_commit_identity",
+        lambda workspace: calls.append("identity") or "identity configured",
+    )
     monkeypatch.setattr(github_service, "create_commit", lambda workspace, message: calls.append("commit") or "ok")
     monkeypatch.setattr(github_service, "git_has_commits", lambda workspace: True)
     monkeypatch.setattr(github_service, "git_remote_url", lambda workspace, remote_name="origin": remote["value"])
@@ -249,8 +311,89 @@ def test_publish_or_update_creates_commit_repository_and_pushes(tmp_path: Path, 
         remote["value"] = "https://github.com/alice/demo.git"
         return "created"
     monkeypatch.setattr(github_service, "create_github_repository", create_repo)
+    monkeypatch.setattr(
+        github_service,
+        "github_setup_git",
+        lambda: calls.append("credentials") or "credentials configured",
+    )
     monkeypatch.setattr(github_service, "push_current_branch", lambda workspace: calls.append("push") or "pushed")
     result = github_service.publish_or_update_github(tmp_path, repository_name="demo")
-    assert calls == ["commit", "create", "push"]
+    assert calls == ["identity", "commit", "create", "credentials", "push"]
     assert result["repository_created"] is True
     assert result["repository_url"] == "https://github.com/alice/demo"
+    assert "identity configured" in result["output"]
+    assert "credentials configured" in result["output"]
+
+
+def test_publish_from_uninitialized_workspace_initializes_git_before_commit(
+    tmp_path: Path, monkeypatch
+) -> None:
+    repository = {"initialized": False, "remote": None}
+    calls: list[str] = []
+    protection = SimpleNamespace(
+        summary="",
+        created=False,
+        changed=False,
+        untracked_paths=(),
+    )
+    monkeypatch.setattr(github_service, "git_available", lambda: True)
+    monkeypatch.setattr(github_service, "github_cli_available", lambda: True)
+    monkeypatch.setattr(github_service, "list_github_accounts", lambda: ["alice"])
+    monkeypatch.setattr(
+        github_service,
+        "is_git_repository",
+        lambda workspace: repository["initialized"],
+    )
+
+    def initialize(workspace):
+        calls.append("init")
+        repository["initialized"] = True
+        return "initialized"
+
+    monkeypatch.setattr(github_service, "git_init", initialize)
+    monkeypatch.setattr(github_service, "ensure_publish_gitignore", lambda workspace: protection)
+    monkeypatch.setattr(github_service, "_current_changes", lambda workspace: [("create", "README.md")])
+    monkeypatch.setattr(
+        github_service,
+        "ensure_github_commit_identity",
+        lambda workspace: calls.append("identity") or "identity configured",
+    )
+    monkeypatch.setattr(
+        github_service,
+        "generate_commit_message",
+        lambda workspace, session_manager=None: "chore: initial commit",
+    )
+    monkeypatch.setattr(
+        github_service,
+        "create_commit",
+        lambda workspace, message: calls.append("commit") or "committed",
+    )
+    monkeypatch.setattr(github_service, "git_has_commits", lambda workspace: "commit" in calls)
+    monkeypatch.setattr(
+        github_service,
+        "git_remote_url",
+        lambda workspace, remote_name="origin": repository["remote"],
+    )
+
+    def create_repo(workspace, name, **kwargs):
+        calls.append("create")
+        repository["remote"] = "https://github.com/alice/demo.git"
+        return "created"
+
+    monkeypatch.setattr(github_service, "create_github_repository", create_repo)
+    monkeypatch.setattr(
+        github_service,
+        "github_setup_git",
+        lambda: calls.append("credentials") or "credentials configured",
+    )
+    monkeypatch.setattr(
+        github_service,
+        "push_current_branch",
+        lambda workspace: calls.append("push") or "pushed",
+    )
+
+    result = github_service.publish_or_update_github(tmp_path, repository_name="demo")
+
+    assert calls == ["init", "identity", "commit", "create", "credentials", "push"]
+    assert result["repository_created"] is True
+    assert result["commit_created"] is True

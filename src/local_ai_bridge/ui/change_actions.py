@@ -1,9 +1,11 @@
 from __future__ import annotations
 from local_ai_bridge.i18n import tr as _
 from pathlib import Path
+from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor, QSyntaxHighlighter, QTextCharFormat
-from PySide6.QtWidgets import QFileDialog, QMessageBox, QTableWidgetItem
+from PySide6.QtWidgets import QApplication, QFileDialog, QMessageBox, QTableWidgetItem
 from local_ai_bridge.core.models import ChangePlan
+from local_ai_bridge.services.apply import plan_requires_explicit_confirmation, update_recap
 from local_ai_bridge.services.archive import inspect_zip
 from local_ai_bridge.services.temp_storage import latest_zip_file, managed_subdir, stage_import_zip
 from local_ai_bridge.services.testing import format_test_results, run_detected_tests, test_results_to_dicts, test_summary
@@ -51,14 +53,44 @@ class ChangeActionsMixin:
                 _('Puoi cambiare in qualsiasi momento la cartella da Preferenze.'),
             )
 
+    def _apply_zip_button_hint(self) -> str:
+        return _(
+            "Clic normale: usa l’ultimo ZIP trovato. Shift+clic: scegli manualmente il file ZIP da applicare."
+        )
+
+    def refresh_apply_zip_button_hint(self) -> None:
+        button = getattr(self, 'simple_apply_zip_button', None)
+        if button is None:
+            return
+        hint = self._apply_zip_button_hint()
+        button.setToolTip(hint)
+        if hasattr(button, 'setStatusTip'):
+            button.setStatusTip(hint)
+
     def apply_latest_zip(self) -> None:
+        if QApplication.keyboardModifiers() & Qt.ShiftModifier:
+            self._show_status(_('Selezione manuale dello ZIP richiesta con Shift+clic.'))
+            self.choose_zip()
+            return
         configured = self.settings.update_zip_directory.strip()
         if not configured:
-            QMessageBox.warning(self, _('Cartella ZIP non impostata'), _('Imposta prima la cartella che contiene gli ZIP delle modifiche.'))
+            QMessageBox.warning(
+                self,
+                _('Cartella ZIP non impostata'),
+                _(
+                    'Imposta prima la cartella che contiene gli ZIP delle modifiche, oppure tieni premuto Shift e clicca “Applica aggiornamento” per scegliere un file manualmente.'
+                ),
+            )
             return
         latest = latest_zip_file(configured)
         if latest is None:
-            QMessageBox.warning(self, _('Nessuno ZIP trovato'), f'Nella cartella configurata non è presente alcun file ZIP:\n{configured}')
+            QMessageBox.warning(
+                self,
+                _('Nessuno ZIP trovato'),
+                _(
+                    'Nella cartella configurata non è presente alcun file ZIP:\n{path}\n\nTieni premuto Shift e clicca “Applica aggiornamento” per scegliere un file manualmente.'
+                ).format(path=configured),
+            )
             return
         self.zip_path_edit.setText(str(latest))
         self._show_status(f'Ultimo ZIP selezionato: {latest.name}')
@@ -111,45 +143,112 @@ class ChangeActionsMixin:
         self.tabs.setCurrentWidget(self.changes_tab)
         self._show_status(f'Piano pronto: {len(plan.changes)} file. Nessuna modifica ancora applicata.')
 
+    def _current_update_recap(self) -> str:
+        if self.current_plan is None:
+            return ''
+        return update_recap(
+            self.current_plan,
+            source_label=_('File patch:'),
+            files_label=_('File interessati:'),
+            warnings_label=_('Avvisi:'),
+            more_files_template=_('• ... e altri {count} file'),
+            more_warnings_template=_('• ... e altri {count} avvisi'),
+        )
+
+    def _completed_update_message(self, message: str) -> str:
+        recap = self._current_update_recap()
+        if not recap:
+            return message
+        return message + '\n\n' + _('Recap aggiornamento:') + '\n\n' + recap
+
+    def _confirm_high_risk_recovery(self, plan: ChangePlan) -> bool:
+        if not plan.metadata.get('requires_explicit_confirmation'):
+            return True
+        actions = plan.metadata.get('recovery_actions', [])
+        high_details = []
+        if isinstance(actions, list):
+            for item in actions:
+                if not isinstance(item, dict) or item.get('severity') != 'high':
+                    continue
+                target = item.get('target')
+                action = item.get('action', 'recupero')
+                detail = item.get('detail', '')
+                prefix = f"{target}: {action}" if target else str(action)
+                high_details.append(f"• {prefix}" + (f" — {detail}" if detail else ''))
+        if not high_details:
+            high_details = [_('• Il piano contiene recuperi ad alta severità.')]
+        message = (
+            _('BridgAI ha recuperato una risposta AI incompleta o ambigua con severità alta.')
+            + '\n\n'
+            + '\n'.join(high_details[:8])
+        )
+        if len(high_details) > 8:
+            message += '\n' + _('• ... e altri {count} recuperi').format(count=len(high_details) - 8)
+        message += (
+            '\n\n'
+            + _('Controlla attentamente percorsi, contenuti e diff. Vuoi continuare con la normale conferma di applicazione?')
+        )
+        answer = QMessageBox.question(
+            self,
+            _('Conferma recupero ad alta severità'),
+            message,
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        return answer == QMessageBox.Yes
+
     def apply_current_plan(self) -> None:
         if self.current_plan is None:
             return
+        explicit_confirmation = plan_requires_explicit_confirmation(self.current_plan)
+        if not self._confirm_high_risk_recovery(self.current_plan):
+            return
         if self.settings.simple_mode and self.settings.gemini_drive_enabled:
-            names = '\n'.join((f'• {item.target}' for item in self.current_plan.changes[:20]))
-            if len(self.current_plan.changes) > 20:
-                names += f'\n• ... e altri {len(self.current_plan.changes) - 20} file'
+            recap = self._current_update_recap()
             answer = QMessageBox.question(
                 self,
                 _('Applica piano'),
-                _('Hai controllato l’anteprima? Verrà creato un backup e saranno modificati questi file:')
-                + f'\n\n{names}\n\n'
+                _('Hai controllato l’anteprima? Verrà creato un backup e saranno applicate queste modifiche:')
+                + f'\n\n{recap}\n\n'
                 + _('Procedere con l’applicazione?'),
                 QMessageBox.Yes | QMessageBox.No,
                 QMessageBox.No,
             )
         elif self.settings.simple_mode:
+            recap = self._current_update_recap()
             answer = QMessageBox.question(
                 self,
                 _('Applica aggiornamento'),
-                _("Vuoi applicare l'aggiornamento?"),
+                _("Vuoi applicare l'aggiornamento?")
+                + f'\n\n{recap}\n\n'
+                + _('Procedere con l’applicazione?'),
                 QMessageBox.Yes | QMessageBox.No,
                 QMessageBox.No,
             )
         else:
             summary_text = format_pre_apply_summary(build_pre_apply_summary(self.current_plan))
-            names = '\n'.join((f'• {item.target}' for item in self.current_plan.changes[:20]))
-            if len(self.current_plan.changes) > 20:
-                names += f'\n• ... e altri {len(self.current_plan.changes) - 20} file'
+            recap = self._current_update_recap()
             answer = QMessageBox.question(
                 self,
                 _('Conferma applicazione'),
-                f'Checklist pre-applicazione:\n\n{summary_text}\n\nFile:\n{names}\n\nProcedere?',
+                _('Checklist pre-applicazione:')
+                + f'\n\n{summary_text}\n\n'
+                + _('Recap aggiornamento:')
+                + f'\n\n{recap}\n\n'
+                + _('Procedere?'),
                 QMessageBox.Yes | QMessageBox.No,
                 QMessageBox.No,
             )
         if answer == QMessageBox.Yes:
             plan = self.current_plan
-            self._run_background(lambda: self.apply_service.apply(plan), self._after_apply, _('Applicazione transazionale in corso...'))
+            self._run_background(
+                lambda: self.apply_service.apply(
+                    plan,
+                    explicit_confirmation=explicit_confirmation,
+                ),
+                self._after_apply,
+                _('Applicazione transazionale in corso...'),
+            )
 
     def _after_apply(self, record) -> None:
         self._show_status(f'Applicazione completata. Sessione: {record.session_id}')
@@ -162,11 +261,13 @@ class ChangeActionsMixin:
                 _('Verifica post-applicazione in corso...'),
             )
             return
+        message = self._completed_update_message(
+            f'File applicati: {len(record.files)}\nSessione backup: {record.session_id}'
+        )
         answer = QMessageBox.question(
             self,
             _('Applicazione completata'),
-            f'File applicati: {len(record.files)}\nSessione backup: {record.session_id}'
-            '\n\nEseguire ora i controlli e i test rilevati?',
+            message + '\n\n' + _('Eseguire ora i controlli e i test rilevati?'),
             QMessageBox.Yes | QMessageBox.No,
             QMessageBox.Yes,
         )
@@ -194,19 +295,19 @@ class ChangeActionsMixin:
                 QMessageBox.warning(
                     self,
                     _('Aggiornamento applicato con avvisi'),
-                    _('L’aggiornamento è stato applicato, ma uno o più controlli non sono stati superati. Apri la modalità avanzata per vedere i dettagli.'),
+                    self._completed_update_message(_('L’aggiornamento è stato applicato, ma uno o più controlli non sono stati superati. Apri la modalità avanzata per vedere i dettagli.')),
                 )
             elif unavailable:
                 QMessageBox.information(
                     self,
                     _('Aggiornamento completato'),
-                    _('Aggiornamento applicato. Alcuni controlli opzionali non erano disponibili e sono stati saltati.'),
+                    self._completed_update_message(_('Aggiornamento applicato. Alcuni controlli opzionali non erano disponibili e sono stati saltati.')),
                 )
             else:
                 QMessageBox.information(
                     self,
                     _('Aggiornamento completato'),
-                    _('Aggiornamento applicato correttamente.'),
+                    self._completed_update_message(_('Aggiornamento applicato correttamente.')),
                 )
             return
         self.test_output.setPlainText(format_test_results(results))

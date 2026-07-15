@@ -12,11 +12,11 @@ from PySide6.QtWidgets import (
 
 from local_ai_bridge.core.settings import (
     DEVELOPMENT_MODE,
-    OPERATIONS_MODE,
     PREFERRED_WEB_AI_CHATGPT,
     PREFERRED_WEB_AI_CLAUDE,
     PREFERRED_WEB_AI_CUSTOM,
     PREFERRED_WEB_AI_GEMINI,
+    OPERATIONS_MODE,
 )
 from local_ai_bridge.i18n import tr as _
 
@@ -27,32 +27,33 @@ def choose_initial_setup(
     current_provider: str = PREFERRED_WEB_AI_CHATGPT,
     allow_cancel: bool = False,
 ) -> tuple[str, str] | None:
-    """Ask for the two choices that define the initial BridgAI experience."""
+    """Ask for the primary experience and preferred Web AI provider."""
     dialog = QDialog(parent)
     dialog.setWindowTitle(_('Configura BridgAI'))
     dialog.setModal(True)
     dialog.setMinimumWidth(520)
 
-    title = QLabel(_('Come vuoi usare BridgAI?'))
+    title = QLabel(_('Scegli come usare BridgAI'))
     title.setStyleSheet('font-size: 18px; font-weight: 600;')
     introduction = QLabel(
         _(
-            'Scegli la modalità principale e l’AI Web che usi più spesso. '
-            'Potrai cambiare entrambe in qualsiasi momento dalle Impostazioni.'
+            'Puoi lavorare su software e repository oppure usare una modalità guidata '
+            'per documenti, presentazioni, PDF, immagini e altre attività con l’AI.'
         )
     )
     introduction.setWordWrap(True)
 
+
     mode_combo = QComboBox(dialog)
-    mode_combo.addItem(_('Modalità Sviluppo'), DEVELOPMENT_MODE)
-    mode_combo.addItem(_('Modalità Operativa'), OPERATIONS_MODE)
+    mode_combo.addItem(_('Sviluppo software'), DEVELOPMENT_MODE)
+    mode_combo.addItem(_('Assistente Attività AI'), OPERATIONS_MODE)
     mode_index = mode_combo.findData(current_mode)
     mode_combo.setCurrentIndex(max(0, mode_index))
 
     mode_help = QLabel(
         _(
-            '<b>Sviluppo:</b> crea o modifica programmi, siti, script e automazioni.<br>'
-            '<b>Operativa:</b> lavora sui tuoi file e ottieni documenti, analisi e altri risultati.'
+            'Sviluppo software usa workspace, diff, test e Git. Assistente Attività AI '
+            'prepara prompt guidati e lascia facoltativo l’uso di un progetto locale.'
         )
     )
     mode_help.setWordWrap(True)
@@ -74,7 +75,7 @@ def choose_initial_setup(
     provider_help.setWordWrap(True)
 
     form = QFormLayout()
-    form.addRow(_('Modalità di utilizzo:'), mode_combo)
+    form.addRow(_('Modalità principale:'), mode_combo)
     form.addRow('', mode_help)
     form.addRow(_('AI Web preferita:'), provider_combo)
     form.addRow('', provider_help)

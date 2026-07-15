@@ -8,8 +8,11 @@ import urllib.request
 import zipfile
 from pathlib import Path
 
+from local_ai_bridge.core import settings as settings_module
 from local_ai_bridge.core.settings import AppSettings, SettingsStore
+from local_ai_bridge.services import browser_extension
 from local_ai_bridge.services.browser_extension import queue_request
+from local_ai_bridge.web import extension_api
 from local_ai_bridge.web.server import BridgeHTTPServer, BridgeState
 
 
@@ -155,7 +158,10 @@ def test_extension_api_requires_local_token_and_supports_full_exchange(
         assert payload["action"] == "attach_context"
         assert payload["files"] == ["extra.py"]
         assert payload["artifact_url"] != first_artifact_url
-        assert "richiedili nuovamente" in payload["followup_prompt"]
+        followup_prompt = payload["followup_prompt"]
+        assert "richiedili nuovamente" in followup_prompt
+        assert "Se il task richiede modifiche" in followup_prompt
+        assert "Procedi con le modifiche" not in followup_prompt
 
         status, artifact, _headers = _request(
             base + payload["artifact_url"],
@@ -377,7 +383,21 @@ def test_extension_api_synchronizes_and_resets_download_directory(
         assert "verifica" in payload["error"]
         assert store.load().update_zip_directory == ""
 
-        probe = download_directory / ".bridgai-download-directory-123-test.tmp"
+        legacy_probe = download_directory / ".bridgai-download-directory-123-test.tmp"
+        legacy_probe.write_bytes(b"BridgAI download directory probe\n")
+        status, payload, _headers = _request(
+            base + "/api/extension/download-directory",
+            method="POST",
+            token=token,
+            payload={"enabled": True, "path": str(legacy_probe)},
+        )
+        assert status == 200
+        assert payload["action"] == "download_directory_ready"
+        assert Path(payload["update_directory"]) == download_directory.resolve()
+        assert store.load().update_zip_directory == str(download_directory.resolve())
+        assert not legacy_probe.exists()
+
+        probe = download_directory / "bridgai-download-directory-456-test.tmp"
         probe.write_bytes(b"BridgAI download directory probe\n")
         status, payload, _headers = _request(
             base + "/api/extension/download-directory",
@@ -558,3 +578,122 @@ def test_extension_api_delivers_initial_operational_zip_and_registers_results(
         server.shutdown()
         server.server_close()
         thread.join(timeout=5)
+
+
+def test_extension_api_blocks_stale_chatgpt_only_worker_from_claiming_claude(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    token = "provider-capability-token-with-at-least-thirty-two-chars"
+    SettingsStore().save(
+        AppSettings(
+            last_workspace=str(workspace),
+            browser_extension_enabled=True,
+            browser_extension_token=token,
+        )
+    )
+    queued = queue_request(workspace, "task", provider="claude")
+
+    state = BridgeState(initial_workspace=workspace)
+    server = BridgeHTTPServer(("127.0.0.1", 0), state)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base = f"http://127.0.0.1:{server.server_address[1]}"
+    try:
+        status, payload, _headers = _request(
+            base + "/api/extension/next",
+            token=token,
+            headers={"X-BridgAI-Extension-Version": "0.5.0"},
+        )
+        assert status == 400
+        assert "Claude" in payload["error"]
+        assert "chrome://extensions" in payload["error"]
+        current = browser_extension.current_request(queued["request_id"])
+        assert current is not None
+        assert current["status"] == "queued"
+
+        status, payload, _headers = _request(
+            base + "/api/extension/next",
+            token=token,
+            headers={
+                "X-BridgAI-Extension-Version": "0.6.2",
+                "X-BridgAI-Extension-Providers": "chatgpt,claude,gemini",
+            },
+        )
+        assert status == 200
+        assert payload["request"]["request_id"] == queued["request_id"]
+        assert payload["request"]["provider"] == "claude"
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+def test_extension_response_rejects_a_different_web_ai_provider(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(settings_module, "app_data_dir", lambda: tmp_path / "data")
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    queued = browser_extension.queue_request(workspace, "task", provider="claude")
+
+    try:
+        extension_api._handle_response(
+            object(),
+            settings_module.AppSettings(),
+            {
+                "request_id": queued["request_id"],
+                "provider": "gemini",
+                "text": "#scarica src/example.py",
+            },
+        )
+    except ValueError as exc:
+        assert "provider AI Web diverso" in str(exc)
+    else:
+        raise AssertionError("Una risposta proveniente dal provider errato deve essere rifiutata.")
+
+    current = browser_extension.current_request(queued["request_id"])
+    assert current is not None
+    assert current["status"] == "queued"
+
+
+def test_extension_response_builds_a_text_update_plan(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(settings_module, "app_data_dir", lambda: tmp_path / "data")
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    queued = browser_extension.queue_request(workspace, "task", provider="gemini")
+    registered: dict[str, object] = {}
+
+    class State:
+        def register_plan(self, plan):
+            registered["plan"] = plan
+            return "plan-text-1"
+
+    payload = extension_api._handle_response(
+        State(),
+        settings_module.AppSettings(textual_file_operations_mode=True),
+        {
+            "request_id": queued["request_id"],
+            "provider": "gemini",
+            "text": """
+BEGIN_FILE
+OPERATION: CREATE
+PATH: created.py
+FINAL_NEWLINE: YES
+CONTENT:
+```python
+CREATED = True
+```
+END_FILE
+""",
+        },
+    )
+
+    assert payload["action"] == "text_update_ready"
+    assert payload["plan_id"] == "plan-text-1"
+    assert registered["plan"].changes[0].target == "created.py"
+    current = browser_extension.current_request(queued["request_id"])
+    assert current is not None
+    assert current["status"] == "update_ready"
+    assert current["plan_id"] == "plan-text-1"
+    assert current["update_zip_path"] == ""

@@ -6,7 +6,8 @@ BridgAI processes local project files, imported archives, generated patches, and
 
 | Version | Supported |
 | --- | --- |
-| 1.0.x | Yes |
+| 1.1.x | Yes |
+| 1.0.x | No |
 | Earlier versions | No |
 
 Only the latest public release receives security fixes unless otherwise stated.

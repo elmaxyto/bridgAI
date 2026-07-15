@@ -4,12 +4,16 @@ from local_ai_bridge.i18n import tr as _
 from local_ai_bridge.ui.widgets import _button
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
+    QAbstractItemView,
     QComboBox,
     QFormLayout,
     QGroupBox,
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QHeaderView,
+    QSizePolicy,
+    QTreeWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -66,5 +70,38 @@ def build_publication_tab(window) -> QWidget:
     note.setWordWrap(True)
     intro_layout.addWidget(note)
     layout.addWidget(intro)
-    layout.addStretch(1)
+
+    history_group = QGroupBox(_('Modifiche applicate a questo progetto'))
+    history_group.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+    history_layout = QVBoxLayout(history_group)
+
+    history_header = QHBoxLayout()
+    history_help = QLabel(_('Storico permanente del progetto aperto, salvato anche in BRIDGAI_HISTORY.md.'))
+    history_help.setWordWrap(True)
+    window.publication_history_summary = QLabel('—')
+    window.publication_history_summary.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+    window.publication_history_summary.setTextInteractionFlags(Qt.TextSelectableByMouse)
+    history_header.addWidget(history_help, 1)
+    history_header.addWidget(window.publication_history_summary, 0)
+    history_layout.addLayout(history_header)
+
+    window.publication_applied_history = QTreeWidget()
+    window.publication_applied_history.setColumnCount(5)
+    window.publication_applied_history.setHeaderLabels([_('Quando'), _('Tipo'), _('Stato'), _('Messaggio'), _('File')])
+    window.publication_applied_history.setRootIsDecorated(False)
+    window.publication_applied_history.setAlternatingRowColors(True)
+    window.publication_applied_history.setUniformRowHeights(True)
+    window.publication_applied_history.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+    window.publication_applied_history.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+    window.publication_applied_history.setMinimumHeight(360)
+    window.publication_applied_history.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+    history_header_view = window.publication_applied_history.header()
+    history_header_view.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+    history_header_view.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+    history_header_view.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+    history_header_view.setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
+    history_header_view.setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)
+    history_layout.addWidget(window.publication_applied_history, 1)
+    layout.addWidget(history_group, 1)
+
     return page

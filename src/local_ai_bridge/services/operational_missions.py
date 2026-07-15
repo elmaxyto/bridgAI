@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Iterable
 
 from local_ai_bridge.core.settings import app_data_dir
+from local_ai_bridge.core.superpowers import SuperpowerError, normalize_superpower_id
 
 from local_ai_bridge.services.operational_catalog import (
     CATEGORY_CUSTOM,
@@ -18,6 +19,7 @@ from local_ai_bridge.services.operational_catalog import (
     CATEGORY_IMAGES,
     CATEGORY_PRESENTATIONS,
     CATEGORY_SPREADSHEETS,
+    CATEGORY_TRANSLATION,
     CATEGORY_WRITING,
     MISSION_ARCHIVED,
     MISSION_CANCELLED,
@@ -89,6 +91,14 @@ def _normalized_paths(values: Iterable[object]) -> tuple[str, ...]:
     return tuple(normalized)
 
 
+
+def _validated_work_category(value: object) -> str:
+    text = _validated_text(value, "work category", required=True)
+    try:
+        return normalize_superpower_id(text)
+    except SuperpowerError as exc:
+        raise MissionValidationError("mission work category is invalid") from exc
+
 def _validated_timestamp(value: object, label: str) -> str:
     text = _validated_text(value, label, required=True)
     try:
@@ -112,6 +122,7 @@ class OperationalMission:
     original_request: str
     procedure_id: str
     work_category: str
+    superpower_id: str
     provider: str
     workspace: str
     input_paths: tuple[str, ...]
@@ -139,13 +150,9 @@ class OperationalMission:
         )
         if procedure_id not in MISSION_PROCEDURES:
             raise MissionValidationError("mission procedure is unsupported")
-        work_category = _validated_text(
-            data.get("work_category", CATEGORY_CUSTOM),
-            "work category",
-            required=True,
+        work_category = _validated_work_category(
+            data.get("work_category", CATEGORY_CUSTOM)
         )
-        if work_category not in MISSION_WORK_CATEGORIES:
-            raise MissionValidationError("mission work category is unsupported")
         provider = _validated_text(
             data.get("provider", PROVIDER_CHATGPT),
             "provider",
@@ -169,6 +176,7 @@ class OperationalMission:
             ),
             procedure_id=procedure_id,
             work_category=work_category,
+            superpower_id=_validated_text(data.get("superpower_id", ""), "superpower id"),
             provider=provider,
             workspace=_validated_text(data.get("workspace", ""), "workspace"),
             input_paths=_normalized_paths(raw_inputs),
@@ -232,6 +240,7 @@ class OperationalMissionStore:
         original_request: str,
         procedure_id: str = PROCEDURE_INPUT_INVENTORY,
         work_category: str = CATEGORY_CUSTOM,
+        superpower_id: str = "",
         provider: str = PROVIDER_CHATGPT,
         workspace: str | Path | None = None,
         input_paths: Iterable[str | Path] = (),
@@ -246,11 +255,13 @@ class OperationalMissionStore:
         )
         if clean_procedure not in MISSION_PROCEDURES:
             raise MissionValidationError("mission procedure is unsupported")
-        clean_category = _validated_text(
-            work_category, "work category", required=True
-        )
-        if clean_category not in MISSION_WORK_CATEGORIES:
-            raise MissionValidationError("mission work category is unsupported")
+        clean_category = _validated_work_category(work_category)
+        clean_superpower_id = _validated_text(superpower_id, "superpower id")
+        if clean_superpower_id:
+            try:
+                clean_superpower_id = normalize_superpower_id(clean_superpower_id)
+            except SuperpowerError as exc:
+                raise MissionValidationError("mission superpower id is invalid") from exc
         clean_provider = _validated_text(provider, "provider", required=True)
         if clean_provider not in MISSION_PROVIDERS:
             raise MissionValidationError("mission provider is unsupported")
@@ -279,6 +290,7 @@ class OperationalMissionStore:
             original_request=clean_request,
             procedure_id=clean_procedure,
             work_category=clean_category,
+            superpower_id=clean_superpower_id,
             provider=clean_provider,
             workspace=clean_workspace,
             input_paths=clean_inputs,

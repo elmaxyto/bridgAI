@@ -37,8 +37,21 @@ def test_web_ai_is_the_primary_operational_workflow_and_local_tools_are_advanced
     assert "queue_operational_request" in web_actions_source
     assert "prepare_operational_tool_in_development" in web_actions_source
     assert "operations_category_combo" in tab_source
+    assert "refresh_operational_superpowers" in actions_source
+    assert "_ensure_operational_superpowers_current" in actions_source
+    assert "_operations_superpower_refresh_key" in actions_source
+    assert "list_superpower_summaries(workspace, rebuild_if_missing=False)" in actions_source
+    assert "ensure_operational_superpower_index" in actions_source
+    assert "rebuild_superpower_index(workspace)" in actions_source
+    assert "Tipo di attività:" in tab_source
+    assert "Prompt guidato:" in tab_source
+    assert "Traduzione" in tab_source
+    assert "operations_superpower_combo" in tab_source
+    assert "operational_superpower_allowed" in actions_source
+    assert "Automatico (consigliato)" in actions_source
+    assert "superpower.instructions" in actions_source
     assert "operations_provider_combo" in tab_source
-    assert "Prepara e invia all’AI" in tab_source
+    assert "Prepara richiesta e apri l’AI" in tab_source
     assert "Importa risultati" in operational_ui_source
     assert "Strumenti locali avanzati" in operational_ui_source
     assert "Unisci e riepiloga CSV" in operational_ui_source
@@ -49,8 +62,17 @@ def test_web_ai_is_the_primary_operational_workflow_and_local_tools_are_advanced
     assert "ToggleSwitch" in secondary_source
     assert "setCheckable(True)" not in operational_ui_source
     assert "self.operations_start_button.setEnabled(ready)" in actions_source
-    assert "operations_history_toggle.setChecked(True)" in web_actions_source
+    assert "Prompt guidato copiato negli appunti" in web_actions_source
     assert "web_plan" in presenter_source
+
+    main_source = _source("src/local_ai_bridge/ui/main_window.py")
+    settings_source = _source("src/local_ai_bridge/ui/tabs/settings.py")
+    wizard_source = _source("src/local_ai_bridge/ui/application_modes.py")
+    assert "self.tabs.addTab(self.operations_tab" in main_source
+    assert "self.tabs.insertTab(0, self.operations_tab" not in main_source
+    assert "Attività AI" in main_source
+    assert "primary_mode_combo" in settings_source
+    assert "mode_combo" in wizard_source
 
 
 def test_web_operational_labels_are_bilingual() -> None:
@@ -61,16 +83,15 @@ def test_web_operational_labels_are_bilingual() -> None:
         _source("src/local_ai_bridge/resources/i18n_en.json")
     )
     expected = {
-        "Nuovo lavoro con AI Web": "New Web AI task",
+        "Assistente Attività AI": "AI Task Assistant",
+        "Nuova attività guidata": "New guided task",
         "Documenti e PDF": "Documents and PDFs",
         "Fogli di calcolo e dati": "Spreadsheets and data",
         "Presentazioni": "Presentations",
         "Immagini e grafica": "Images and graphics",
-        "Prepara e invia all’AI": "Prepare and send to AI",
-        "Importa risultati…": "Import results…",
+        "Prepara richiesta e apri l’AI": "Prepare request and open AI",
+        "Il progetto locale è facoltativo. Puoi lavorare senza cartella oppure usare i controlli del progetto per organizzare materiali, note e risultati di un’attività più lunga.": "A local project is optional. You can work without a folder or use the project controls to organize materials, notes, and results for a longer task.",
         "Strumenti locali avanzati": "Advanced local tools",
-        "Definisci il risultato": "Define the result",
-        "Autorizza gli input": "Authorize inputs",
         "Mostra cronologia e risultati": "Show history and results",
         "Mostra strumenti locali avanzati": "Show advanced local tools",
     }
@@ -97,3 +118,11 @@ def test_extension_routes_operational_requests_as_results_not_code_updates() -> 
     assert "request.initial_attachment" in background_source
     assert 'type: "BRIDGAI_ATTACH_CONTEXT"' in background_source
     assert '["update_ready", "result_ready"].includes(payload.action)' in downloads_source
+
+
+def test_operations_actions_imports_running_state_for_web_result_button() -> None:
+    from local_ai_bridge.ui import operations_actions
+
+    source = Path(operations_actions.__file__).read_text(encoding="utf-8")
+    assert "MISSION_RUNNING," in source[source.index("from local_ai_bridge.services.operational_missions import ("):source.index("from local_ai_bridge.ui.operations_presenters import (")]
+    assert "mission.state in {MISSION_READY, MISSION_RUNNING}" in source

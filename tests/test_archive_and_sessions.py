@@ -10,6 +10,7 @@ from local_ai_bridge.core.io import atomic_write as real_atomic_write, sha256_fi
 from local_ai_bridge.core.sessions import SessionManager
 from local_ai_bridge.services.apply import ApplyService
 from local_ai_bridge.services.archive import inspect_zip
+from local_ai_bridge.services.text_update_import import inspect_text_update_response
 
 
 def make_manager(tmp_path: Path) -> SessionManager:
@@ -303,3 +304,151 @@ def test_legacy_zip_without_project_identity_remains_compatible(tmp_path: Path) 
     plan = inspect_zip(workspace, archive)
 
     assert any("senza identità progetto" in warning for warning in plan.warnings)
+
+
+def test_apply_appends_permanent_project_history(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    archive_path = tmp_path / "change.zip"
+    with zipfile.ZipFile(archive_path, "w") as zf:
+        zf.writestr("example.txt", "new content")
+        zf.writestr("commit-message.md", "feat: add permanent history\n\n- create example file")
+
+    manager = make_manager(tmp_path)
+    record = ApplyService(manager).apply(inspect_zip(workspace, archive_path))
+
+    markdown = workspace / "BRIDGAI_HISTORY.md"
+    journal = workspace / ".bridgai" / "applied-history.jsonl"
+    assert markdown.exists()
+    assert journal.exists()
+    assert "feat: add permanent history" in markdown.read_text(encoding="utf-8")
+    assert "example.txt" in markdown.read_text(encoding="utf-8")
+    assert record.session_id in journal.read_text(encoding="utf-8")
+
+
+def test_markdown_update_appends_commit_message_to_permanent_project_history(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "example.txt").write_text("old\n", encoding="utf-8")
+    document = '''<!-- BRIDGAI:FILE commit-message.md -->
+<!-- BRIDGAI:TEXT final-newline=1 -->
+```markdown
+feat: persist Markdown update history
+
+- replace example through a Markdown update
+```
+
+BEGIN_FILE example.txt
+OPERATION: REPLACE
+FINAL_NEWLINE: YES
+CONTENT:
+```text
+new
+```
+END_FILE example.txt
+'''
+
+    plan = inspect_text_update_response(
+        workspace,
+        document,
+        preferred="text_file_operations",
+    )
+    manager = make_manager(tmp_path)
+    record = ApplyService(manager).apply(plan)
+
+    history = (workspace / "BRIDGAI_HISTORY.md").read_text(encoding="utf-8")
+    journal = (workspace / ".bridgai" / "applied-history.jsonl").read_text(
+        encoding="utf-8"
+    )
+    assert record.operation == "full_file"
+    assert "feat: persist Markdown update history" in history
+    assert "replace example through a Markdown update" in history
+    assert "example.txt" in history
+    assert "commit-message.md" not in history
+    assert "feat: persist Markdown update history" in journal
+
+
+def test_project_history_reads_permanent_journal_before_session_fallback(tmp_path: Path) -> None:
+    from local_ai_bridge.services.project_history import read_project_history_entries
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    manager = make_manager(tmp_path)
+    record = manager.apply_transaction(
+        workspace,
+        "zip",
+        [("a.txt", b"new")],
+        commit_message="feat: persistent list",
+    )
+
+    entries = read_project_history_entries(workspace, session_manager=manager)
+
+    assert entries[0].session_id == record.session_id
+    assert entries[0].commit_message == "feat: persistent list"
+    assert entries[0].files == ["a.txt"]
+
+
+def test_rollback_appends_permanent_project_history_entry(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "a.txt").write_text("old", encoding="utf-8")
+    manager = make_manager(tmp_path)
+    manager.apply_transaction(workspace, "zip", [("a.txt", b"new")], commit_message="feat: change a")
+
+    manager.rollback_latest(workspace)
+
+    history = (workspace / "BRIDGAI_HISTORY.md").read_text(encoding="utf-8")
+    assert "applicata" in history
+    assert "ripristinata" in history
+    assert history.count("feat: change a") >= 2
+
+
+def test_project_history_silently_imports_old_local_sessions(tmp_path: Path) -> None:
+    from local_ai_bridge.services.project_history import read_project_history_entries
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    manager = make_manager(tmp_path)
+    record = manager.apply_transaction(
+        workspace,
+        "zip",
+        [("legacy.txt", b"legacy content")],
+        commit_message="feat: legacy session",
+    )
+    (workspace / "BRIDGAI_HISTORY.md").unlink()
+    (workspace / ".bridgai" / "applied-history.jsonl").unlink()
+
+    entries = read_project_history_entries(workspace, session_manager=manager)
+
+    assert entries[0].session_id == record.session_id
+    assert (workspace / "BRIDGAI_HISTORY.md").exists()
+    assert (workspace / ".bridgai" / "applied-history.jsonl").exists()
+    assert "feat: legacy session" in (workspace / "BRIDGAI_HISTORY.md").read_text(encoding="utf-8")
+    assert "legacy.txt" in (workspace / ".bridgai" / "applied-history.jsonl").read_text(encoding="utf-8")
+
+
+def test_project_history_session_import_is_idempotent(tmp_path: Path) -> None:
+    from local_ai_bridge.services.project_history import read_project_history_entries
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    manager = make_manager(tmp_path)
+    manager.apply_transaction(
+        workspace,
+        "zip",
+        [("once.txt", b"new")],
+        commit_message="feat: import once",
+    )
+    journal = workspace / ".bridgai" / "applied-history.jsonl"
+    journal.unlink()
+    (workspace / "BRIDGAI_HISTORY.md").unlink()
+
+    read_project_history_entries(workspace, session_manager=manager)
+    read_project_history_entries(workspace, session_manager=manager)
+
+    journal_text = journal.read_text(encoding="utf-8")
+    markdown_text = (workspace / "BRIDGAI_HISTORY.md").read_text(encoding="utf-8")
+    assert journal_text.count("feat: import once") == 1
+    assert markdown_text.count("feat: import once") == 1

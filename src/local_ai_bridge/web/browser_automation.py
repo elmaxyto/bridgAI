@@ -4,11 +4,14 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
+from local_ai_bridge.core.settings import SettingsStore
 from local_ai_bridge.services.browser_extension import (
     connection_snapshot,
     current_request,
     ensure_extension_token,
+    normalize_web_ai_provider,
     queue_request,
+    web_ai_provider_label,
 )
 from local_ai_bridge.services.pre_apply import build_pre_apply_summary
 
@@ -71,6 +74,7 @@ def _status_payload(state) -> dict[str, Any]:
             ),
             "error": request.get("error", "") if request_matches else "",
             "updated_at": request.get("updated_at", 0.0),
+            "provider": request.get("provider", "chatgpt"),
         }
         if request
         else None,
@@ -139,13 +143,16 @@ def dispatch_browser_automation_action(
                 "oppure attendi il completamento."
             )
         report = str(body.get("report", "")).strip()
-        queued = queue_request(state.require_workspace(), report, provider="chatgpt")
+        persisted_settings = SettingsStore().load()
+        provider = normalize_web_ai_provider(persisted_settings.preferred_web_ai)
+        queued = queue_request(state.require_workspace(), report, provider=provider)
         return {
             "request_id": queued["request_id"],
             "status": queued["status"],
+            "provider": provider,
             "message": (
-                "Richiesta accodata. Il browser fidato la invierà a ChatGPT "
-                "appena risulterà connesso."
+                f"Richiesta accodata. Il browser fidato la invierà a "
+                f"{web_ai_provider_label(provider)} appena risulterà connesso."
             ),
         }
 

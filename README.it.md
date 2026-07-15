@@ -32,7 +32,7 @@ BridgAI rende questo flusso esplicito e controllato:
 
 ## Sviluppato attraverso il proprio flusso
 
-BridgAI è stato sviluppato in modo iterativo usando BridgAI stesso. La prima versione 0.1 ha fornito il flusso di report, esportazione controllata, revisione e applicazione che è stato poi usato per realizzare le versioni successive fino alla 1.1.0, compreso l’attuale flusso dei messaggi di commit Git.
+BridgAI è stato sviluppato in modo iterativo usando BridgAI stesso. La prima versione 0.1 ha fornito il flusso di report, esportazione controllata, revisione e applicazione che è stato poi usato per realizzare le versioni successive fino alla 1.1.1, compresi l’attuale flusso dei messaggi di commit Git, i superpoteri, le note progetto e i perfezionamenti del flusso con estensione browser.
 
 Questa esperienza costituisce una validazione end-to-end concreta del caso d’uso principale dell’applicazione. Integra, ma non sostituisce, i test automatici ripetibili.
 

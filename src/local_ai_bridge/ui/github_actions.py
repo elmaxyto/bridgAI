@@ -1,12 +1,86 @@
 from __future__ import annotations
 from local_ai_bridge.i18n import tr as _
+from datetime import datetime
 from pathlib import Path
 from PySide6.QtCore import QUrl
 from PySide6.QtGui import QDesktopServices
-from PySide6.QtWidgets import QInputDialog, QLineEdit, QMessageBox
+from PySide6.QtWidgets import QInputDialog, QLineEdit, QMessageBox, QTreeWidgetItem
 from local_ai_bridge.services.git import git_remote_url, push_current_branch
 from local_ai_bridge.services.github import GitHubRepository, connect_github_repository, create_github_repository, github_auth_status, github_cli_available, github_login_command, github_setup_git, github_switch_account, list_github_accounts, list_github_repositories, publish_or_update_github, simple_github_status
+from local_ai_bridge.services.project_history import read_project_history_entries
 from local_ai_bridge.ui.command_dialog import InteractiveCommandDialog
+
+
+def _format_session_timestamp(value: str) -> str:
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return value
+    if parsed.tzinfo is not None:
+        parsed = parsed.astimezone()
+    return parsed.strftime("%Y-%m-%d %H:%M")
+
+
+def _files_label(count: int) -> str:
+    if count == 1:
+        return _("1 file")
+    return _("{count} file").format(count=count)
+
+
+def _commit_message_title(message: str | None) -> str:
+    if not message:
+        return _("Nessun messaggio salvato")
+    lines = [line.strip() for line in message.splitlines() if line.strip()]
+    return lines[0] if lines else _("Nessun messaggio salvato")
+
+
+def _commit_message_details(message: str | None) -> str:
+    if not message:
+        return _("Nessun messaggio salvato")
+    lines = [line.strip() for line in message.splitlines() if line.strip()]
+    if not lines:
+        return _("Nessun messaggio salvato")
+    bullets = [line for line in lines[1:] if line.startswith("-")]
+    return "\n".join([lines[0], *bullets])
+
+
+def _publication_history_rows(session_manager, workspace: Path, limit: int = 200) -> list[dict[str, str]]:
+    rows: list[dict[str, str]] = []
+    for record in read_project_history_entries(workspace, session_manager=session_manager, limit=limit):
+        files = [item for item in record.files if item]
+        status_label = {
+            "applied": _("applicata"),
+            "rolled_back": _("ripristinata"),
+            "failed_rolled_back": _("fallita e ripristinata"),
+        }.get(record.status, record.status)
+        operation_label = {
+            "zip": _("ZIP"),
+            "patch": _("patch"),
+            "full_file": _("file completo"),
+        }.get(record.operation, record.operation)
+        test_detail = ""
+        if record.test_results:
+            passed = sum(1 for item in record.test_results if item.get("status") == "passed")
+            failed = sum(1 for item in record.test_results if item.get("status") in {"failed", "timeout", "error"})
+            test_detail = _("Test salvati: {passed} ok, {failed} problemi").format(passed=passed, failed=failed)
+        file_detail = "\n".join(f"• {item}" for item in files) if files else _("Nessun file elencato")
+        details = "\n\n".join(
+            part for part in (
+                _commit_message_details(record.commit_message),
+                _("File modificati:") + "\n" + file_detail,
+                test_detail,
+            ) if part
+        )
+        rows.append({
+            "when": _format_session_timestamp(record.created_at),
+            "operation": operation_label,
+            "status": status_label,
+            "message": _commit_message_title(record.commit_message),
+            "files": _files_label(len(files)),
+            "details": details,
+        })
+    return rows
+
 
 class GitHubActionsMixin:
 
@@ -22,12 +96,14 @@ class GitHubActionsMixin:
             self.publication_primary_button.setEnabled(False)
             self.publication_open_button.setEnabled(False)
             self.publication_create_group.setVisible(False)
+            self._refresh_publication_applied_history()
             return
         try:
             status = simple_github_status(workspace)
         except Exception as exc:
             self.publication_changes_status.setText(str(exc))
             self.publication_primary_button.setEnabled(False)
+            self._refresh_publication_applied_history()
             return
         cli_ready = bool(status.get('github_cli_available'))
         self.publication_account_status.setText(_('Pronto') if cli_ready else _('GitHub CLI non installata'))
@@ -54,6 +130,52 @@ class GitHubActionsMixin:
             self.publication_primary_button.setText(_('Pubblica il progetto su GitHub'))
             self.publication_changes_status.setText(_('Il progetto non è ancora pubblicato.'))
         self.publication_primary_button.setEnabled(cli_ready and (not published or change_count > 0))
+        self._refresh_publication_applied_history()
+
+    def _refresh_publication_applied_history(self) -> None:
+        history = getattr(self, 'publication_applied_history', None)
+        if history is None:
+            return
+        summary = getattr(self, 'publication_history_summary', None)
+        history.clear()
+        workspace = getattr(self, 'workspace', None)
+        if workspace is None:
+            if summary is not None:
+                summary.setText(_('Apri un progetto'))
+            item = QTreeWidgetItem([_('Apri un progetto per vedere le modifiche applicate.'), '', '', '', ''])
+            history.addTopLevelItem(item)
+            return
+        try:
+            rows = _publication_history_rows(self.session_manager, workspace)
+        except Exception as exc:
+            if summary is not None:
+                summary.setText(_('Non disponibile'))
+            item = QTreeWidgetItem([_('Storico modifiche non disponibile: {error}').format(error=exc), '', '', '', ''])
+            history.addTopLevelItem(item)
+            return
+        if summary is not None:
+            summary.setText(_('{count} modifiche registrate').format(count=len(rows)) if rows else _('Nessuna modifica registrata'))
+        if not rows:
+            item = QTreeWidgetItem([_('Nessuna modifica applicata registrata per questo progetto.'), '', '', '', ''])
+            history.addTopLevelItem(item)
+            return
+        for row in rows:
+            item = QTreeWidgetItem([
+                row['when'],
+                row['operation'],
+                row['status'],
+                row['message'],
+                row['files'],
+            ])
+            details = row.get('details', '')
+            if details:
+                for column in range(5):
+                    item.setToolTip(column, details)
+            history.addTopLevelItem(item)
+        history.resizeColumnToContents(0)
+        history.resizeColumnToContents(1)
+        history.resizeColumnToContents(2)
+        history.resizeColumnToContents(4)
 
     def publish_from_publication_tab(self) -> None:
         workspace = self._require_workspace()

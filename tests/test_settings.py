@@ -1,11 +1,14 @@
 from pathlib import Path
 
 from local_ai_bridge.core.settings import (
+    MAX_EXTERNAL_CONTEXT_PATHS,
     MAX_RECENT_WORKSPACES,
     PREFERRED_WEB_AI_CUSTOM,
+    PREFERRED_WEB_AI_DEEPSEEK,
     PREFERRED_WEB_AI_GEMINI,
     AppSettings,
     SettingsStore,
+    normalize_external_context_paths,
     normalize_recent_workspaces,
     preferred_web_ai_exchange_formats,
     remember_recent_workspace,
@@ -53,6 +56,35 @@ def test_recent_workspaces_ignore_invalid_persisted_values(tmp_path: Path) -> No
         encoding="utf-8",
     )
     assert store.load().recent_workspaces == ["/projects/one"]
+
+
+def test_external_context_paths_round_trip(tmp_path: Path) -> None:
+    store = SettingsStore()
+    store.path = tmp_path / "settings.json"
+    expected = [str(tmp_path / "library"), str(tmp_path / "legacy")]
+
+    store.save(AppSettings(external_context_paths=expected))
+
+    assert store.load().external_context_paths == expected
+
+
+def test_external_context_paths_are_backward_compatible(tmp_path: Path) -> None:
+    store = SettingsStore()
+    store.path = tmp_path / "settings.json"
+    store.path.write_text('{"last_workspace": "C:/workspace"}', encoding="utf-8")
+
+    assert store.load().external_context_paths == []
+
+
+def test_external_context_paths_are_normalized_and_limited() -> None:
+    values: list[object] = [" /projects/lib ", "", None, "/projects/lib"]
+    values.extend(f"/projects/context-{index}" for index in range(MAX_EXTERNAL_CONTEXT_PATHS + 2))
+
+    normalized = normalize_external_context_paths(values)
+
+    assert normalized[0] == "/projects/lib"
+    assert len(normalized) == MAX_EXTERNAL_CONTEXT_PATHS
+    assert normalized.count("/projects/lib") == 1
 
 
 def test_temp_directory_round_trip(tmp_path: Path) -> None:
@@ -183,6 +215,13 @@ def test_web_auto_start_round_trip(tmp_path: Path) -> None:
     assert store.load().web_auto_start is True
 
 
+def test_windows_diagnostic_consoles_round_trip(tmp_path: Path) -> None:
+    store = SettingsStore()
+    store.path = tmp_path / "settings.json"
+    store.save(AppSettings(windows_show_diagnostic_consoles=True))
+    assert store.load().windows_show_diagnostic_consoles is True
+
+
 def test_external_ai_and_manual_web_defaults_are_backward_compatible(tmp_path: Path) -> None:
     store = SettingsStore()
     store.path = tmp_path / "settings.json"
@@ -190,6 +229,7 @@ def test_external_ai_and_manual_web_defaults_are_backward_compatible(tmp_path: P
     loaded = store.load()
     assert loaded.grok_url == "https://grok.com/"
     assert loaded.web_auto_start is False
+    assert loaded.windows_show_diagnostic_consoles is False
 
 
 def test_dark_mode_round_trip(tmp_path: Path) -> None:
@@ -494,6 +534,7 @@ def test_preferred_web_ai_presets_map_to_exchange_formats() -> None:
     assert preferred_web_ai_exchange_formats("chatgpt") == (False, False)
     assert preferred_web_ai_exchange_formats("claude") == (False, False)
     assert preferred_web_ai_exchange_formats("gemini") == (False, True)
+    assert preferred_web_ai_exchange_formats("deepseek") == (True, True)
     assert preferred_web_ai_exchange_formats("custom") is None
 
 
@@ -502,7 +543,7 @@ def test_preferred_web_ai_round_trip_reapplies_its_preset(tmp_path: Path) -> Non
     store.path = tmp_path / "settings.json"
     store.save(
         AppSettings(
-            preferred_web_ai=PREFERRED_WEB_AI_GEMINI,
+            preferred_web_ai=PREFERRED_WEB_AI_DEEPSEEK,
             markdown_exchange_mode=True,
             textual_file_operations_mode=False,
         )
@@ -510,8 +551,8 @@ def test_preferred_web_ai_round_trip_reapplies_its_preset(tmp_path: Path) -> Non
 
     loaded = store.load()
 
-    assert loaded.preferred_web_ai == PREFERRED_WEB_AI_GEMINI
-    assert loaded.markdown_exchange_mode is False
+    assert loaded.preferred_web_ai == PREFERRED_WEB_AI_DEEPSEEK
+    assert loaded.markdown_exchange_mode is True
     assert loaded.textual_file_operations_mode is True
 
 
@@ -672,3 +713,11 @@ def test_invalid_primary_mode_falls_back_to_development(tmp_path: Path) -> None:
     store.path = tmp_path / "settings.json"
     store.path.write_text('{"primary_mode": "automatic"}', encoding="utf-8")
     assert store.load().primary_mode == DEVELOPMENT_MODE
+
+
+def test_removed_anonymous_setting_is_ignored_when_loading_legacy_data(tmp_path: Path) -> None:
+    store = SettingsStore()
+    store.path = tmp_path / "settings.json"
+    store.path.write_text('{"open_ai_anonymously": true}', encoding="utf-8")
+    loaded = store.load()
+    assert not hasattr(loaded, "open_ai_anonymously")

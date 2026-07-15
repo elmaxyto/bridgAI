@@ -4,8 +4,9 @@ from pathlib import Path
 
 import pytest
 
+from local_ai_bridge.core.models import ChangePlan, FileChange
 from local_ai_bridge.core.sessions import SessionManager
-from local_ai_bridge.services.apply import ApplyService
+from local_ai_bridge.services.apply import ApplyService, update_recap
 from local_ai_bridge.services.patching import (
     GeminiPatchParseError,
     apply_search_replace,
@@ -19,6 +20,85 @@ from local_ai_bridge.services.patching import (
 
 def patch(search: str, replacement: str) -> str:
     return f"<<<<<<< SEARCH\n{search}\n=======\n{replacement}\n>>>>>>> REPLACE"
+
+
+def test_update_recap_uses_commit_message_and_changed_files(tmp_path: Path) -> None:
+    plan = ChangePlan(
+        plan_type="zip",
+        workspace=tmp_path,
+        source_path=tmp_path / "bridgai-update.zip",
+        changes=[
+            FileChange(
+                source="src/app.py",
+                target="src/app.py",
+                kind="modify",
+                old_sha256="old",
+                new_sha256="new",
+            ),
+            FileChange(
+                source="tests/test_app.py",
+                target="tests/test_app.py",
+                kind="create",
+                old_sha256=None,
+                new_sha256="new",
+            ),
+        ],
+        diff="",
+        warnings=["Controlla il diff prima di applicare."],
+        metadata={
+            "commit_message": "feat(ui): mostra recap aggiornamento\n\n- usa commit-message.md nel popup\n- elenca i file modificati",
+        },
+    )
+
+    recap = update_recap(plan)
+
+    assert "File patch: bridgai-update.zip" in recap
+    assert "feat(ui): mostra recap aggiornamento" in recap
+    assert "usa commit-message.md nel popup" in recap
+    assert "File interessati:" in recap
+    assert "• src/app.py" in recap
+    assert "• tests/test_app.py" in recap
+    assert "Avvisi:" in recap
+
+
+def test_update_recap_omits_source_for_pasted_text(tmp_path: Path) -> None:
+    plan = ChangePlan(
+        plan_type="patch",
+        workspace=tmp_path,
+        source_path=None,
+        changes=[],
+        diff="",
+        metadata={},
+    )
+
+    assert "File patch:" not in update_recap(plan)
+
+
+def test_update_recap_limits_long_file_lists(tmp_path: Path) -> None:
+    plan = ChangePlan(
+        plan_type="zip",
+        workspace=tmp_path,
+        source_path=None,
+        changes=[
+            FileChange(
+                source=f"file_{index}.txt",
+                target=f"file_{index}.txt",
+                kind="modify",
+                old_sha256="old",
+                new_sha256="new",
+            )
+            for index in range(3)
+        ],
+        diff="",
+        metadata={},
+    )
+
+    recap = update_recap(plan, file_limit=2)
+
+    assert "• file_0.txt" in recap
+    assert "• file_1.txt" in recap
+    assert "file_2.txt" not in recap
+    assert "• ... e altri 1 file" in recap
 
 
 def test_patch_requires_blocks() -> None:
@@ -44,9 +124,32 @@ def test_inspect_patch_builds_diff(tmp_path: Path) -> None:
     assert "+value = 2" in plan.diff
 
 
-def test_full_python_file_is_validated(tmp_path: Path) -> None:
-    with pytest.raises(SyntaxError):
-        inspect_full_file(tmp_path, "new.py", "def broken(:\n")
+def test_full_python_file_syntax_error_still_builds_high_risk_plan(tmp_path: Path) -> None:
+    plan = inspect_full_file(tmp_path, "new.py", "def broken(:\n")
+
+    assert plan.changes[0].target == "new.py"
+    assert "def broken" in plan.diff
+    assert plan.metadata["recovery_severity"] == "high"
+    assert plan.metadata["requires_explicit_confirmation"] is True
+    assert any(
+        item.get("action") == "python_syntax_error"
+        for item in plan.metadata["recovery_actions"]
+    )
+
+
+def test_apply_service_requires_explicit_confirmation_for_high_risk_plan(tmp_path: Path) -> None:
+    manager = SessionManager()
+    manager.root = tmp_path / "sessions"
+    manager.root.mkdir()
+    service = ApplyService(manager)
+    plan = inspect_full_file(tmp_path, "new.py", "def broken(:\n")
+
+    with pytest.raises(ValueError, match="conferma esplicita"):
+        service.apply(plan)
+
+    record = service.apply(plan, explicit_confirmation=True)
+
+    assert record.files[0]["target"] == "new.py"
 
 
 def test_full_file_can_preserve_an_outer_code_fence(tmp_path: Path) -> None:

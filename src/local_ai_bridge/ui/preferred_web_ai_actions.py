@@ -6,6 +6,7 @@ from local_ai_bridge.core.settings import (
     PREFERRED_WEB_AI_CHATGPT,
     PREFERRED_WEB_AI_CLAUDE,
     PREFERRED_WEB_AI_CUSTOM,
+    PREFERRED_WEB_AI_DEEPSEEK,
     PREFERRED_WEB_AI_GEMINI,
     PREFERRED_WEB_AI_VALUES,
     preferred_web_ai_exchange_formats,
@@ -19,6 +20,7 @@ class PreferredWebAIActionsMixin:
             PREFERRED_WEB_AI_CHATGPT: getattr(self, "simple_chatgpt_button", None),
             PREFERRED_WEB_AI_CLAUDE: getattr(self, "simple_claude_button", None),
             PREFERRED_WEB_AI_GEMINI: getattr(self, "simple_gemini_button", None),
+            PREFERRED_WEB_AI_DEEPSEEK: getattr(self, "simple_deepseek_button", None),
         }
         preferred = self.settings.preferred_web_ai
         selected = [
@@ -117,6 +119,7 @@ class PreferredWebAIActionsMixin:
             PREFERRED_WEB_AI_CHATGPT: "ChatGPT",
             PREFERRED_WEB_AI_CLAUDE: "Claude",
             PREFERRED_WEB_AI_GEMINI: "Gemini",
+            PREFERRED_WEB_AI_DEEPSEEK: "DeepSeek",
             PREFERRED_WEB_AI_CUSTOM: _("Personalizzato"),
         }
         self._show_status(

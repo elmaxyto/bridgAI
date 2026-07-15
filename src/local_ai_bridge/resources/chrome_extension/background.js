@@ -1,4 +1,4 @@
-importScripts("download_tracking.js");
+importScripts("providers.js", "download_tracking.js");
 
 const DEFAULTS = {
   enabled: false,
@@ -11,7 +11,11 @@ const DEFAULTS = {
 let activeRequestId = "";
 let activeTabId = null;
 let polling = false;
+let lastPollTime = 0;
 let lastDirectorySyncCheck = 0;
+
+const FAST_POLL_INTERVAL_MS = 1000;
+const MIN_POLL_DEBOUNCE_MS = 400;
 
 function normalizedBridgeUrl(value, legacyPort = 8765) {
   let raw = String(value || "").trim();
@@ -52,6 +56,10 @@ async function fetchBridge(current, path, options = {}) {
   const headers = new Headers(options.headers || {});
   headers.set("X-BridgAI-Extension-Token", current.token);
   headers.set("X-BridgAI-Extension-Version", chrome.runtime.getManifest().version);
+  headers.set(
+    "X-BridgAI-Extension-Providers",
+    self.BridgAIWebAIProviders.ids.join(",")
+  );
   return fetch(baseUrl(current) + path, { ...options, headers });
 }
 
@@ -96,7 +104,6 @@ function arrayBufferToBase64(buffer) {
   }
   return btoa(binary);
 }
-
 
 function normalizedFilename(value) {
   let raw = String(value || "").trim();
@@ -177,14 +184,10 @@ async function synchronizeDownloadDirectory(current, { force = false } = {}) {
   }
 
   if (!force && current.syncedDownloadDirectory) {
-    const statusResponse = await fetchBridge(current, "/api/extension/status");
-    const statusPayload = await jsonPayload(statusResponse);
-    if (statusPayload.update_directory === current.syncedDownloadDirectory) {
-      return statusPayload;
-    }
+    return { update_directory: current.syncedDownloadDirectory };
   }
 
-  const probeName = `.bridgai-download-directory-${Date.now()}-${Math.random().toString(16).slice(2)}.tmp`;
+  const probeName = `bridgai-download-directory-${Date.now()}-${Math.random().toString(16).slice(2)}.tmp`;
   const downloadId = await chrome.downloads.download({
     url: "data:text/plain;base64,QnJpZGdBSSBkb3dubG9hZCBkaXJlY3RvcnkgcHJvYmUK",
     filename: `${directory}/${probeName}`,
@@ -270,15 +273,41 @@ async function downloadArtifact(artifactUrl) {
   return arrayBufferToBase64(await response.arrayBuffer());
 }
 
-async function chatgptTab() {
-  const tabs = await chrome.tabs.query({ url: "https://chatgpt.com/*" });
-  if (tabs.length) {
-    return tabs.find((tab) => tab.active) || tabs[0];
+function tabBelongsToProvider(tab, provider) {
+  const rawUrl = String(tab?.pendingUrl || tab?.url || "").trim();
+  if (!rawUrl) return false;
+  try {
+    return provider.hosts.includes(new URL(rawUrl).hostname.toLowerCase());
+  } catch (_error) {
+    return false;
   }
-  return chrome.tabs.create({ url: "https://chatgpt.com/", active: true });
 }
 
-async function waitForTab(tabId) {
+async function activateProviderTab(tab, provider) {
+  if (!Number.isInteger(tab?.id)) {
+    throw new Error(`Scheda ${provider.label} non valida.`);
+  }
+  const activated = await chrome.tabs.update(tab.id, { active: true });
+  if (Number.isInteger(activated.windowId)) {
+    await chrome.windows.update(activated.windowId, { focused: true }).catch((error) => {
+      console.debug(`BridgAI ${provider.label} window focus:`, error.message);
+    });
+  }
+  return activated;
+}
+
+async function providerTab(providerValue) {
+  const providerId = self.BridgAIWebAIProviders.requireKnown(providerValue);
+  const provider = self.BridgAIWebAIProviders.get(providerId);
+  const tabs = await chrome.tabs.query({ url: [...provider.matches] });
+  const recent = [...tabs].sort(
+    (first, second) => Number(second.lastAccessed || 0) - Number(first.lastAccessed || 0)
+  )[0];
+  const tab = recent || await chrome.tabs.create({ url: provider.url, active: true });
+  return activateProviderTab(tab, provider);
+}
+
+async function waitForTab(tabId, timeoutMilliseconds = 5000) {
   const tab = await chrome.tabs.get(tabId);
   if (tab.status === "complete") return;
   await new Promise((resolve) => {
@@ -292,21 +321,42 @@ async function waitForTab(tabId) {
     setTimeout(() => {
       chrome.tabs.onUpdated.removeListener(listener);
       resolve();
-    }, 20000);
+    }, timeoutMilliseconds);
   });
 }
 
+async function sendContentMessage(tabId, message) {
+  try {
+    return await chrome.tabs.sendMessage(tabId, message);
+  } catch (_error) {
+    await chrome.scripting.executeScript({
+      target: { tabId },
+      files: ["providers.js", "content.js"]
+    });
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    return chrome.tabs.sendMessage(tabId, message);
+  }
+}
+
 async function deliverRequest(request) {
-  const tab = await chatgptTab();
+  const providerId = self.BridgAIWebAIProviders.requireKnown(request.provider);
+  const provider = self.BridgAIWebAIProviders.get(providerId);
+  const tab = await providerTab(provider.id);
   activeRequestId = request.request_id;
   activeTabId = tab.id;
-  await waitForTab(tab.id);
+  const readyTab = await chrome.tabs.get(tab.id);
+  if (!tabBelongsToProvider(readyTab, provider)) {
+    throw new Error(
+      `La scheda aperta non appartiene a ${provider.label}. Accedi al provider e riprova.`
+    );
+  }
   let message;
   if (request.initial_attachment && request.artifact_url) {
     const artifactBase64 = await downloadArtifact(request.artifact_url);
     message = {
       type: "BRIDGAI_ATTACH_CONTEXT",
       requestId: request.request_id,
+      provider: provider.id,
       artifactBase64,
       filename: request.filename || request.context_filename || "bridgai_missione.zip",
       followupPrompt: request.prompt
@@ -315,19 +365,20 @@ async function deliverRequest(request) {
     message = {
       type: "BRIDGAI_SEND_PROMPT",
       requestId: request.request_id,
+      provider: provider.id,
       prompt: request.prompt
     };
   }
   let result;
   try {
-    result = await chrome.tabs.sendMessage(tab.id, message);
-  } catch (_error) {
-    await chrome.scripting.executeScript({
-      target: { tabId: tab.id },
-      files: ["content.js"]
-    });
-    await new Promise((resolve) => setTimeout(resolve, 250));
-    result = await chrome.tabs.sendMessage(tab.id, message);
+    result = await sendContentMessage(tab.id, message);
+  } catch (firstError) {
+    await waitForTab(tab.id);
+    try {
+      result = await sendContentMessage(tab.id, message);
+    } catch (_secondError) {
+      throw firstError;
+    }
   }
   if (result?.error) {
     throw new Error(result.error);
@@ -336,14 +387,14 @@ async function deliverRequest(request) {
 
 async function poll() {
   if (polling) return;
+  const now = Date.now();
+  if (now - lastPollTime < MIN_POLL_DEBOUNCE_MS) return;
   polling = true;
+  lastPollTime = now;
   try {
     const current = await config();
     if (!current.enabled || !current.token) return;
-    await downloadTracking.retry();
-    await synchronizeDownloadDirectory(current).catch((error) => {
-      console.debug("BridgAI download directory:", error.message);
-    });
+
     const payload = await jsonRequest("/api/extension/next");
     if (payload.request) {
       try {
@@ -352,7 +403,13 @@ async function poll() {
         await reportAutomationError(payload.request.request_id, error);
         throw error;
       }
+      return;
     }
+
+    await downloadTracking.retry();
+    await synchronizeDownloadDirectory(current).catch((error) => {
+      console.debug("BridgAI download directory:", error.message);
+    });
   } catch (error) {
     console.debug("BridgAI poll:", error.message);
   } finally {
@@ -366,13 +423,18 @@ async function postResponse(message, sender) {
   const payload = await jsonRequest("/api/extension/response", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ request_id: message.requestId, text: message.text })
+    body: JSON.stringify({
+      request_id: message.requestId,
+      provider: message.provider,
+      text: message.text
+    })
   });
   if (payload.action === "attach_context" && activeTabId !== null) {
     const artifactBase64 = await downloadArtifact(payload.artifact_url);
     const result = await chrome.tabs.sendMessage(activeTabId, {
       type: "BRIDGAI_ATTACH_CONTEXT",
       requestId: message.requestId,
+      provider: message.provider,
       artifactBase64,
       filename: payload.filename,
       followupPrompt: payload.followup_prompt
@@ -386,12 +448,18 @@ async function postResponse(message, sender) {
 
 async function uploadZipFromUrl(message) {
   const current = await config();
+  const providerId = self.BridgAIWebAIProviders.requireKnown(message.provider);
+  if (!self.BridgAIWebAIProviders.trustedDownloadUrlFor(providerId, message.url)) {
+    throw new Error(
+      `Il collegamento ZIP non appartiene a una sorgente attendibile di ${self.BridgAIWebAIProviders.get(providerId).label}.`
+    );
+  }
   try {
     const remote = await fetch(message.url, { credentials: "include" });
     if (!remote.ok) throw new Error(`Download HTTP ${remote.status}`);
     const bytes = await remote.arrayBuffer();
     if (!hasZipSignature(bytes)) {
-      throw new Error("Il file ricevuto da ChatGPT non è uno ZIP valido.");
+      throw new Error("Il file ricevuto dall’AI Web non è uno ZIP valido.");
     }
     const filename = zipFilename(message, remote);
     const response = await bridgeFetch("/api/extension/zip", {
@@ -486,6 +554,10 @@ chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === "bridgai-poll") poll();
 });
 chrome.storage.onChanged.addListener(() => poll());
+chrome.tabs.onActivated.addListener(() => poll());
+chrome.tabs.onUpdated.addListener((_tabId, info) => {
+  if (info.status === "complete") poll();
+});
 chrome.alarms.create("bridgai-poll", { periodInMinutes: 0.5 });
-setInterval(poll, 2500);
+setInterval(poll, FAST_POLL_INTERVAL_MS);
 poll();

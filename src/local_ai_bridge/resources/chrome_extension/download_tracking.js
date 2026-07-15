@@ -66,9 +66,7 @@ self.BridgAIDownloadTracking = {
         .filter(Boolean);
       return candidates.some((value) => {
         try {
-          const url = new URL(value);
-          const hostname = url.hostname.toLowerCase();
-          return hostname === "chatgpt.com" || hostname.endsWith(".oaiusercontent.com");
+          return self.BridgAIWebAIProviders.trustedDownloadUrl(value);
         } catch (_error) {
           return false;
         }

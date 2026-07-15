@@ -27,6 +27,7 @@ def build_pre_apply_summary(plan: ChangePlan) -> dict[str, Any]:
         "binary": counts["binary"],
         "has_binary": counts["binary"] > 0,
         "has_commit_message": bool(str(plan.metadata.get("commit_message", "")).strip()),
+        "source_name": source,
         "warning_count": len(plan.warnings),
         "warnings": list(plan.warnings),
         "tests": tests,
@@ -45,6 +46,7 @@ def format_pre_apply_summary(summary: dict[str, Any]) -> str:
         f"eliminati {summary.get('deleted', 0)})\n"
         f"File binari: {binary_text}\n"
         f"commit-message.md: {commit_text}\n"
+        f"File patch: {summary.get('source_name') or '-'}\n"
         f"Avvisi: {summary.get('warning_count', 0)}\n"
         f"Controlli disponibili dopo l’applicazione: {test_text}\n"
         f"Origine piano: {summary.get('origin', '-') }"

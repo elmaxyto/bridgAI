@@ -32,7 +32,7 @@ BridgAI keeps that workflow explicit and controlled:
 
 ## Developed through its own workflow
 
-BridgAI has been developed iteratively using BridgAI itself. The early 0.1 version supplied the report, controlled export, review, and apply workflow that was then used to implement subsequent versions up to 1.1.0, including the current Git commit-message workflow.
+BridgAI has been developed iteratively using BridgAI itself. The early 0.1 version supplied the report, controlled export, review, and apply workflow that was then used to implement subsequent versions up to 1.1.1, including the current Git commit-message workflow, superpowers, project notes, and browser-extension workflow refinements.
 
 This provides practical end-to-end validation of the application's core use case. It complements, rather than replaces, repeatable automated tests.
 

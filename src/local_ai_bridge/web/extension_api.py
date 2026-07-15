@@ -15,6 +15,7 @@ from local_ai_bridge.services.browser_extension import (
     mark_context_ready,
     mark_extension_seen,
     mark_error,
+    mark_text_update_ready,
     mark_update_ready,
     mark_waiting_result,
     mark_waiting_update,
@@ -63,7 +64,10 @@ def authenticate_extension(
         raise PermissionError("Estensione non abilitata o token non valido.")
     if not local_client and len(expected) < 32:
         raise PermissionError("Il token dell’estensione remota non è abbastanza robusto.")
-    mark_extension_seen(str(headers.get("X-BridgAI-Extension-Version", "")))
+    mark_extension_seen(
+        str(headers.get("X-BridgAI-Extension-Version", "")),
+        str(headers.get("X-BridgAI-Extension-Providers", "")),
+    )
     return settings
 
 
@@ -83,6 +87,10 @@ def dispatch_get(
                 "enabled": True,
                 "application_version": application_version,
                 "extension_connected": snapshot.get("connected", False),
+                "extension_version": snapshot.get("extension_version", ""),
+                "extension_providers": snapshot.get(
+                    "extension_providers", ["chatgpt"]
+                ),
                 "request_id": request.get("request_id"),
                 "request_status": request.get("message", ""),
                 "auto_send": settings.browser_extension_auto_send,
@@ -93,7 +101,8 @@ def dispatch_get(
             },
         )
     if path == "/api/extension/next":
-        request = claim_request()
+        snapshot = connection_snapshot()
+        request = claim_request(snapshot.get("extension_providers"))
         if request is not None:
             request["auto_export"] = settings.browser_extension_auto_export
             request["auto_download"] = settings.browser_extension_auto_download
@@ -186,16 +195,22 @@ def _handle_response(
     settings: AppSettings,
     body: dict[str, Any],
 ) -> dict[str, Any]:
+    request_id = str(body.get("request_id", "")).strip()
+    text = str(body.get("text", ""))
+    request, workspace = _request_workspace(request_id)
+    reported_provider = str(body.get("provider", "")).strip().lower()
+    expected_provider = str(request.get("provider", "chatgpt")).strip().lower()
+    if reported_provider and reported_provider != expected_provider:
+        raise ValueError(
+            "La risposta proviene da un provider AI Web diverso da quello richiesto."
+        )
+    record_response(request_id, text)
+
     from local_ai_bridge.services.exporting import (
-        create_export_zip,
+        create_export_zip_resilient,
         parse_download_requests,
     )
     from local_ai_bridge.services.temp_storage import managed_subdir
-
-    request_id = str(body.get("request_id", "")).strip()
-    text = str(body.get("text", ""))
-    record_response(request_id, text)
-    request, workspace = _request_workspace(request_id)
     if request.get("request_kind") == "operational":
         mark_waiting_result(request_id)
         return {
@@ -207,27 +222,59 @@ def _handle_response(
     if requested and settings.browser_extension_auto_export:
         exports = managed_subdir(settings.temp_directory, "exports")
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-        created = create_export_zip(
-            workspace,
-            requested,
-            exports / f"{workspace.name}_ai_context_{stamp}.zip",
-        )
-        artifact = state.register_artifact(created, content_type="application/zip")
-        mark_context_ready(request_id, created, requested)
-        return {
-            "action": "attach_context",
-            "artifact_url": f"/api/extension/artifacts/{artifact.artifact_id}",
-            "filename": artifact.filename,
-            "files": requested,
-            "followup_prompt": (
-                "Ho allegato lo ZIP con i file reali richiesti. Procedi con le modifiche. "
-                "Se servono altri file, richiedili nuovamente con una singola riga "
-                "#scarica; altrimenti restituisci un unico ZIP applicabile da BridgAI, "
-                "con la struttura relativa del progetto alla radice e commit-message.md."
-            ),
-        }
+        try:
+            created, zipped, missing = create_export_zip_resilient(
+                workspace,
+                requested,
+                exports / f"{workspace.name}_ai_context_{stamp}.zip",
+            )
+            artifact = state.register_artifact(created, content_type="application/zip")
+            mark_context_ready(request_id, created, zipped)
+            
+            followup = "Ho allegato lo ZIP con i file reali richiesti. Prosegui con il task usando questi file."
+            if missing:
+                followup += "\n\n[NOTA] I seguenti file richiesti non sono stati trovati o non sono accessibili:\n- " + "\n- ".join(missing)
+            followup += (
+                "\n\nSe servono altri file, richiedili nuovamente con una singola riga #scarica. "
+                "Se il task richiede modifiche e i file sono sufficienti, restituisci un unico ZIP "
+                "applicabile da BridgAI, con la struttura relativa del progetto alla radice e commit-message.md."
+            )
+            
+            return {
+                "action": "attach_context",
+                "artifact_url": f"/api/extension/artifacts/{artifact.artifact_id}",
+                "filename": artifact.filename,
+                "files": zipped,
+                "followup_prompt": followup,
+            }
+        except Exception as exc:
+            mark_error(request_id, str(exc))
+            return {
+                "action": "error",
+                "error": str(exc),
+                "message": f"Errore durante l'esportazione dei file: {exc}"
+            }
     if requested and not settings.browser_extension_auto_export:
         return {"action": "manual", "files": requested}
+    if settings.textual_file_operations_mode:
+        from local_ai_bridge.services.text_file_operations import (
+            inspect_text_file_operations,
+        )
+
+        plan = inspect_text_file_operations(workspace, text)
+        pre_apply = build_pre_apply_summary(plan)
+        plan_id = state.register_plan(plan)
+        mark_text_update_ready(
+            request_id,
+            pre_apply,
+            plan_id=plan_id,
+        )
+        return {
+            "action": "text_update_ready",
+            "plan_id": plan_id,
+            "pre_apply": pre_apply,
+            "files": [],
+        }
     mark_waiting_update(request_id)
     return {
         "action": "wait_for_zip" if settings.browser_extension_auto_download else "manual",
@@ -341,8 +388,10 @@ def _handle_download_complete(
     request, workspace = _request_workspace(request_id)
     target = _downloaded_zip_path(settings, body.get("path"))
     created_at = float(request.get("created_at") or 0.0)
-    if created_at and target.stat().st_mtime < created_at - 2.0:
-        raise ValueError("Lo ZIP scaricato è precedente alla richiesta corrente.")
+    response_received_at = float(request.get("response_received_at") or 0.0)
+    ready_after = max(created_at, response_received_at)
+    if ready_after and target.stat().st_mtime < ready_after - 2.0:
+        raise ValueError("Lo ZIP scaricato è precedente alla risposta corrente.")
     context_path = str(request.get("context_zip_path", "")).strip()
     if context_path and target == Path(context_path).expanduser().resolve(strict=False):
         raise ValueError("Lo ZIP scaricato coincide con il contesto inviato all’AI.")

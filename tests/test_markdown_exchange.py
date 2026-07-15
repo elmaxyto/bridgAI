@@ -92,7 +92,7 @@ def test_parse_malformed_marker_adds_warning_when_valid_file_exists(tmp_path: Pa
     assert any("marcatore BRIDGAI:FILE non valido" in warning for warning in plan.warnings)
 
 
-def test_parse_ignores_root_commit_message(tmp_path: Path) -> None:
+def test_parse_uses_root_commit_message_as_metadata(tmp_path: Path) -> None:
     _write(tmp_path, "a.txt", "old\n")
     document = """<!-- BRIDGAI:FILE commit-message.md -->
 ```markdown
@@ -108,7 +108,8 @@ new
     plan = parse_markdown_response(tmp_path, document)
 
     assert [change.target for change in plan.changes] == ["a.txt"]
-    assert any("commit-message.md ignorato" in warning for warning in plan.warnings)
+    assert plan.metadata["commit_message"] == "feat: should not be applied"
+    assert "commit-message.md" not in plan.metadata["contents"]
 
 
 def test_encode_uses_longer_fence_for_embedded_backticks(tmp_path: Path) -> None:
@@ -222,3 +223,63 @@ def test_latest_markdown_file_accepts_md_and_markdown(tmp_path: Path) -> None:
 
     assert latest_markdown_file(tmp_path) == newer
     assert latest_markdown_file(tmp_path / "missing") is None
+
+
+def test_parse_markdown_exchange_recovers_missing_fence_before_next_file(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path, "a.txt", "old a\n")
+    _write(tmp_path, "b.txt", "old b\n")
+    document = '''<!-- BRIDGAI:FILE a.txt -->
+<!-- BRIDGAI:TEXT final-newline=1 -->
+```text
+new a
+<!-- BRIDGAI:FILE b.txt -->
+<!-- BRIDGAI:TEXT final-newline=1 -->
+```text
+new b
+```
+'''
+
+    plan = parse_markdown_response(tmp_path, document)
+
+    assert plan.metadata["contents"]["a.txt"] == b"new a\n"
+    assert plan.metadata["contents"]["b.txt"] == b"new b\n"
+    assert any("Code fence non chiusa per a.txt" in warning for warning in plan.warnings)
+
+
+def test_parse_markdown_exchange_accepts_plain_markers_when_comments_are_stripped(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path, "src/app.py", "value = 1\n")
+    document = '''BRIDGAI:FILE src/app.py
+BRIDGAI:TEXT final-newline=1
+```python
+value = 2
+```
+'''
+
+    plan = parse_markdown_response(tmp_path, document)
+
+    assert plan.metadata["contents"]["src/app.py"] == b"value = 2\n"
+    assert plan.metadata["provider"] == "markdown_exchange"
+
+
+def test_parse_markdown_exchange_marks_missing_fence_as_high_severity(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path, "a.txt", "old\n")
+    document = '''<!-- BRIDGAI:FILE a.txt -->
+<!-- BRIDGAI:TEXT final-newline=1 -->
+```text
+new
+'''
+
+    plan = parse_markdown_response(tmp_path, document)
+
+    assert plan.metadata["recovery_severity"] == "high"
+    assert plan.metadata["requires_explicit_confirmation"] is True
+    assert any(
+        item.get("action") == "missing_code_fence_at_eof"
+        for item in plan.metadata["recovery_actions"]
+    )

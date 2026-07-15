@@ -7,6 +7,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from local_ai_bridge.services.apply import HIGH_RISK_CONFIRMATION_TOKEN
 from local_ai_bridge.services.pre_apply import build_pre_apply_summary
 from local_ai_bridge.web.security import is_loopback_address
 from local_ai_bridge.web.state import BridgeState
@@ -22,6 +23,9 @@ def _plan_payload(state: BridgeState, plan_id: str) -> dict[str, Any]:
         "diff": plan.diff,
         "commit_message": plan.metadata.get("commit_message"),
         "pre_apply": build_pre_apply_summary(plan),
+        "recovery_severity": plan.metadata.get("recovery_severity", "none"),
+        "requires_explicit_confirmation": plan.metadata.get("requires_explicit_confirmation") is True,
+        "recovery_actions": plan.metadata.get("recovery_actions", []),
     }
 
 
@@ -44,23 +48,26 @@ def dispatch_bridge_action(
         return {"report": build_super_report(workspace, task, settings=state.settings)}
 
     if path == "/api/export":
-        from local_ai_bridge.services.exporting import create_export_zip, parse_download_requests
-        from local_ai_bridge.services.markdown_exchange import encode_files_to_markdown
+        from local_ai_bridge.services.exporting import create_export_zip_resilient, parse_download_requests
+        from local_ai_bridge.services.markdown_exchange import encode_files_to_markdown_resilient
         from local_ai_bridge.services.temp_storage import managed_subdir
 
         requested = parse_download_requests(str(body.get("text", "")))
         exports = managed_subdir(state.settings.temp_directory, "exports")
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        missing: list[str] = []
+        zipped: list[str] = []
         if state.settings.markdown_exchange_mode:
             created = exports / f"ai_context_{stamp}.md"
+            markdown_content, zipped, missing = encode_files_to_markdown_resilient(workspace, requested)
             created.write_text(
-                encode_files_to_markdown(workspace, requested),
+                markdown_content,
                 encoding="utf-8",
             )
             content_type = "text/markdown; charset=utf-8"
             export_format = "markdown"
         else:
-            created = create_export_zip(
+            created, zipped, missing = create_export_zip_resilient(
                 workspace, requested, exports / f"ai_context_{stamp}.zip"
             )
             content_type = "application/zip"
@@ -70,17 +77,22 @@ def dispatch_bridge_action(
             "artifact_id": artifact.artifact_id,
             "filename": artifact.filename,
             "format": export_format,
-            "files": requested,
+            "files": zipped,
+            "missing": missing,
         }
 
     if path == "/api/patch/inspect":
         from local_ai_bridge.services.patching import inspect_gemini_response
-        from local_ai_bridge.services.text_file_operations import (
-            inspect_text_file_operations,
+        from local_ai_bridge.services.text_update_import import (
+            inspect_text_update_response,
         )
 
         plan = (
-            inspect_text_file_operations(workspace, str(body.get("text", "")))
+            inspect_text_update_response(
+                workspace,
+                str(body.get("text", "")),
+                preferred="text_file_operations",
+            )
             if state.settings.textual_file_operations_mode
             else inspect_gemini_response(workspace, str(body.get("text", "")))
         )
@@ -102,7 +114,13 @@ def dispatch_bridge_action(
             raise ValueError("Conferma di applicazione mancante.")
         plan_id = str(body.get("plan_id", ""))
         plan = state.get_plan(plan_id)
-        record = state.apply_service.apply(plan)
+        explicit_confirmation = (
+            body.get("explicit_confirmation") == HIGH_RISK_CONFIRMATION_TOKEN
+        )
+        record = state.apply_service.apply(
+            plan,
+            explicit_confirmation=explicit_confirmation,
+        )
         state.clear_plan(plan_id)
         return {"session": record.to_dict()}
 

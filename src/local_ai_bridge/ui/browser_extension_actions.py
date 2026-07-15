@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import hashlib
+import os
+import sys
+import time
 from pathlib import Path
 
 from PySide6.QtCore import QUrl
@@ -13,13 +16,38 @@ from local_ai_bridge.services.browser_extension import (
     connection_snapshot,
     ensure_extension_token,
     mark_update_ready,
+    normalize_web_ai_provider,
     queue_request,
+    web_ai_provider_label,
+    web_ai_provider_url,
 )
 from local_ai_bridge.services.temp_storage import latest_zip_file
 from local_ai_bridge.web.launcher import (
     browser_extension_service_status,
+    project_root,
     start_web_interface,
+    start_windows_direct_web_server,
 )
+
+HOT_EXTENSION_HANDOFF_SECONDS = 3.0
+
+
+def _browser_extension_needs_wake(snapshot: dict) -> bool:
+    """Return True when a queued request should actively wake the provider tab.
+
+    ``connection_snapshot()["connected"]`` intentionally stays true for a
+    fairly long UI status window, but Manifest V3 service workers can sleep
+    much sooner. For the actual hand-off we require a very recent heartbeat;
+    otherwise opening the selected provider lets the content script trigger an
+    immediate poll instead of waiting for Chrome's next alarm cycle.
+    """
+    try:
+        last_seen = float(snapshot.get("last_seen_at") or 0.0)
+    except (TypeError, ValueError):
+        last_seen = 0.0
+    if last_seen <= 0.0:
+        return not bool(snapshot.get("connected"))
+    return time.time() - last_seen > HOT_EXTENSION_HANDOFF_SECONDS
 
 
 class BrowserExtensionActionsMixin:
@@ -126,22 +154,47 @@ class BrowserExtensionActionsMixin:
         if not self.settings.browser_extension_enabled:
             return False
         try:
-            result = start_web_interface(
-                self.settings.web_port,
-                open_browser=False,
-                workspace_root=self.settings.web_workspace_root or None,
-                remote_access=self.settings.web_remote_access,
-                username=self.settings.web_username or None,
-                password_hash=self.settings.web_password_hash or None,
-                totp_secret=(
-                    self.settings.web_totp_secret
-                    if self.settings.web_totp_enabled
-                    else None
-                ),
-                totp_local_bypass=self.settings.web_totp_local_bypass,
+            try:
+                browser_extension_service_status(
+                    self.settings.web_port,
+                    self.settings.browser_extension_token,
+                )
+                return True
+            except (RuntimeError, ValueError):
+                pass
+
+            console_options = (
+                {"show_console": True}
+                if self.settings.windows_show_diagnostic_consoles
+                else {}
             )
+            if sys.platform == "win32" and self.settings.web_port == 8765:
+                result = start_windows_direct_web_server(
+                    self.settings.web_port,
+                    **console_options,
+                )
+            else:
+                result = start_web_interface(
+                    self.settings.web_port,
+                    open_browser=False,
+                    workspace_root=self.settings.web_workspace_root or None,
+                    remote_access=self.settings.web_remote_access,
+                    username=self.settings.web_username or None,
+                    password_hash=self.settings.web_password_hash or None,
+                    totp_secret=(
+                        self.settings.web_totp_secret
+                        if self.settings.web_totp_enabled
+                        else None
+                    ),
+                    totp_local_bypass=self.settings.web_totp_local_bypass,
+                    **console_options,
+                )
             if result.process is not None:
                 self.web_process = result.process
+            browser_extension_service_status(
+                self.settings.web_port,
+                self.settings.browser_extension_token,
+            )
             return True
         except Exception as exc:
             if not silent:
@@ -189,6 +242,39 @@ class BrowserExtensionActionsMixin:
                 str(directory),
             )
 
+    def start_browser_extension_web_server(self) -> None:
+        if sys.platform != "win32":
+            QMessageBox.information(
+                self,
+                _("Server Web BridgAI"),
+                _("Questo avvio diretto è disponibile solo su Windows."),
+            )
+            return
+
+        script = project_root() / "web_server_force_win.bat"
+        if not script.is_file():
+            QMessageBox.warning(
+                self,
+                _("Script server Web non trovato"),
+                _("Impossibile trovare lo script Windows: {path}").format(path=script),
+            )
+            return
+
+        try:
+            startfile = getattr(os, "startfile")
+            startfile(str(script))
+        except (AttributeError, OSError) as exc:
+            QMessageBox.warning(
+                self,
+                _("Avvio server Web non riuscito"),
+                str(exc),
+            )
+            return
+
+        self._show_status(
+            _("Server Web avviato in una finestra Windows separata.")
+        )
+
     def verify_browser_extension_connection(self) -> None:
         if not self.settings.browser_extension_enabled:
             QMessageBox.information(
@@ -214,6 +300,19 @@ class BrowserExtensionActionsMixin:
             _("Servizio locale raggiungibile. {status}").format(status=request_status),
         )
 
+    def _wake_browser_extension_provider(self, provider: str) -> None:
+        """Open the selected provider only when needed to wake the MV3 worker.
+
+        Chrome can suspend an extension service worker between alarms. Opening the
+        provider page lets the content script send an immediate poll message, so a
+        queued request does not wait for the next alarm cycle.
+        """
+        try:
+            QDesktopServices.openUrl(QUrl(web_ai_provider_url(provider)))
+        except Exception:
+            # The extension still has its alarm-based polling fallback.
+            return
+
     def queue_report_with_browser_extension(self, report: str) -> bool:
         enabled = (
             self.settings.browser_extension_enabled
@@ -225,19 +324,31 @@ class BrowserExtensionActionsMixin:
         if not enabled:
             return False
         try:
+            if not self.ensure_browser_extension_service(silent=True):
+                return False
+            provider = normalize_web_ai_provider(self.settings.preferred_web_ai)
+            snapshot = connection_snapshot()
+            wake_provider = _browser_extension_needs_wake(snapshot)
             request = queue_request(
                 self.workspace,
                 report,
-                provider="chatgpt",
+                provider=provider,
             )
             self._browser_extension_seen_response_id = ""
             self._browser_extension_seen_update_path = ""
             self._browser_extension_seen_error_key = ""
-            self.simple_apply_zip_button.setText(_("Applica aggiornamento"))
-            self.ensure_browser_extension_service(silent=True)
+            self._browser_extension_fallback_prompt_shown_id = ""
+            if wake_provider:
+                self._wake_browser_extension_provider(provider)
+            self.simple_apply_zip_button.setText(_("Applica aggiornamento · Shift: scegli ZIP"))
+            if hasattr(self, "refresh_apply_zip_button_hint"):
+                self.refresh_apply_zip_button_hint()
             self._show_status(
-                _("Richiesta pronta per l’estensione Chrome: {id}").format(
-                    id=request["request_id"]
+                _(
+                    "Richiesta pronta per {provider} tramite l’estensione Chrome: {id}"
+                ).format(
+                    provider=web_ai_provider_label(provider),
+                    id=request["request_id"],
                 )
             )
             return True
@@ -281,16 +392,29 @@ class BrowserExtensionActionsMixin:
                 and error_key != getattr(self, "_browser_extension_seen_error_key", "")
             ):
                 self._browser_extension_seen_error_key = error_key
-                self._show_status(
-                    _("Automazione browser interrotta: {error}").format(
-                        error=error_message
+                if any(x in error_message.lower() for x in ["zip", "download", "pulsante", "non ha mostrato", "scaricabile", "timeout"]):
+                    error_guide = _(
+                        "L'estensione non è riuscita a prelevare lo ZIP automaticamente a causa di modifiche strutturali del sito dell'AI.\n\n"
+                        "Nessun problema! Scarica il file ZIP cliccando sul pulsante direttamente nella chat del browser. "
+                        "BridgAI lo importerà automaticamente dalla tua cartella Download appena completato."
                     )
-                )
-                QMessageBox.warning(
-                    self,
-                    _("Automazione browser interrotta"),
-                    error_message,
-                )
+                    self._show_status(_("Download automatico fallito. Procedi manualmente."))
+                    QMessageBox.information(
+                        self,
+                        _("Importazione manuale richiesta"),
+                        error_guide,
+                    )
+                else:
+                    self._show_status(
+                        _("Automazione browser interrotta: {error}").format(
+                            error=error_message
+                        )
+                    )
+                    QMessageBox.warning(
+                        self,
+                        _("Automazione browser interrotta"),
+                        error_message,
+                    )
 
             response_text = str(request.get("response_text", ""))
             response_digest = hashlib.sha256(response_text.encode("utf-8")).hexdigest()
@@ -302,7 +426,27 @@ class BrowserExtensionActionsMixin:
             ):
                 self.response_edit.setPlainText(response_text)
                 self._browser_extension_seen_response_id = response_key
+                self._response_received_at = time.time()
                 self._show_status(_("Risposta ricevuta automaticamente dall’estensione."))
+
+            if (
+                request.get("status") == "waiting_update"
+                and hasattr(self, "_response_received_at")
+                and time.time() - self._response_received_at > 12.0
+                and getattr(self, "_browser_extension_fallback_prompt_shown_id", "") != request_id
+            ):
+                self._browser_extension_fallback_prompt_shown_id = request_id
+                friendly_prompt = _(
+                    "Il testo della risposta dell'AI è pronto nella chat!\n\n"
+                    "Se l'estensione riscontra difficoltà a scaricare automaticamente lo ZIP dell'aggiornamento, procedi così:\n"
+                    "1. Clicca sul pulsante di download dello ZIP direttamente nella chat del browser.\n"
+                    "2. BridgAI rileverà all'istante il file all'interno della cartella Download senza bloccare il tuo lavoro."
+                )
+                QMessageBox.information(
+                    self,
+                    _("Aggiornamento pronto sulla pagina Web"),
+                    friendly_prompt,
+                )
 
             if (
                 request.get("status") == "waiting_update"
@@ -327,8 +471,11 @@ class BrowserExtensionActionsMixin:
                 )
                 self.zip_path_edit.setText(update_path)
                 self.simple_apply_zip_button.setEnabled(True)
-                self.simple_apply_zip_button.setText(_("Aggiornamento pronto — Applica"))
-                self.simple_apply_zip_button.setToolTip(ready_message)
+                self.simple_apply_zip_button.setText(_("Aggiornamento pronto — Applica · Shift: scegli ZIP"))
+                hint = self._apply_zip_button_hint() if hasattr(self, "_apply_zip_button_hint") else _("Shift+clic: scegli manualmente il file ZIP da applicare.")
+                self.simple_apply_zip_button.setToolTip(ready_message + "\n\n" + hint)
+                if hasattr(self.simple_apply_zip_button, "setStatusTip"):
+                    self.simple_apply_zip_button.setStatusTip(hint)
                 self._show_status(
                     _("ZIP dell’aggiornamento ricevuto: {path}").format(
                         path=update_path
@@ -360,10 +507,28 @@ class BrowserExtensionActionsMixin:
         if not candidates:
             return None
         latest = max(candidates, key=lambda item: item.stat().st_mtime)
-        created_at = float(request.get("created_at") or 0.0)
-        context_path = str(request.get("context_zip_path", ""))
-        if latest.stat().st_mtime < created_at - 2.0:
+        timestamps: list[float] = []
+        for field in ("created_at", "response_received_at"):
+            try:
+                value = float(request.get(field) or 0.0)
+            except (TypeError, ValueError):
+                value = 0.0
+            if value > 0.0:
+                timestamps.append(value)
+        try:
+            local_response_seen_at = float(getattr(self, "_response_received_at", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            local_response_seen_at = 0.0
+        if local_response_seen_at > 0.0:
+            timestamps.append(local_response_seen_at)
+        ready_after = max(timestamps, default=0.0)
+        if ready_after and latest.stat().st_mtime < ready_after - 2.0:
             return None
-        if str(latest.resolve()) == context_path:
-            return None
+        context_path = str(request.get("context_zip_path", "")).strip()
+        if context_path:
+            try:
+                if latest.resolve() == Path(context_path).expanduser().resolve(strict=False):
+                    return None
+            except OSError:
+                return None
         return latest

@@ -19,11 +19,19 @@ def test_advanced_settings_cards_are_grouped_in_requested_order() -> None:
     assert positions == sorted(positions)
     assert "ToggleSwitch(_('Tema scuro'))" in function_source
     assert "_section('AI Web preferita')" in function_source
+    assert "Apri AI in modalità anonima" not in function_source
     assert "_section('Lingua interfaccia')" in function_source
     assert "_section('Cartella aggiornamenti')" in function_source
     assert "_section('Cartella file temporanei')" in function_source
+    assert "_section('Contesti aggiuntivi per il Super-Report')" in function_source
+    assert "external_context_paths_edit" in function_source
     assert "build_ai_assistant_settings_group(window)" in function_source
     assert "_section('Interfaccia web locale')" in function_source
+    assert "_section('Console e log di diagnostica')" in function_source
+    assert "windows_show_diagnostic_consoles_check" in function_source
+    assert "window.open_desktop_log" in function_source
+    assert "window.open_web_server_log" in function_source
+    assert "window.open_logs_directory" in function_source
     assert "_section('Cartella progetti Web UI')" in function_source
     assert "Formato dei file richiesti" in function_source
     assert "Formato delle modifiche proposte" in function_source
@@ -41,14 +49,26 @@ def test_simple_preferences_keep_language_and_hide_other_llm_models() -> None:
     assert "preferred_ai_section.setVisible(window.settings.simple_mode)" in settings_function
     assert "window.simple_mode_check.toggled.connect(preferred_ai_section.setVisible)" in settings_function
 
-    main_source = Path(main_window.__file__).read_text(encoding="utf-8")
-    simple_mode_source = main_source[
-        main_source.index("    def apply_simple_mode"):main_source.index(
-            "    def _auto_copy_report_in_simple_mode"
-        )
-    ]
-    assert "self.other_llm_settings_group.setVisible(not simple)" in simple_mode_source
+    manager_source = Path(
+        main_window.__file__
+    ).parent.joinpath(
+        "layout_managers", "simple_mode_manager.py"
+    ).read_text(encoding="utf-8")
+    assert "self.window.other_llm_settings_group.setVisible(not simple)" in manager_source
+    assert "self.window._refresh_simple_provider_buttons()" in manager_source
+    assert "self.window.simple_chatgpt_button.setVisible(simple)" not in manager_source
 
+
+
+def test_simple_preferences_expose_windows_forced_web_server_button() -> None:
+    from local_ai_bridge.ui.tabs import settings as settings_tab
+
+    source = Path(settings_tab.__file__).read_text(encoding="utf-8")
+    function_source = source[source.index("def build_settings_tab"):]
+    assert "window.simple_force_web_server_button = _button(" in function_source
+    assert "window.start_windows_direct_web_server_from_settings" in function_source
+    assert "setVisible(sys.platform == 'win32')" in function_source
+    assert "preferred_ai_layout.addWidget(window.simple_force_web_server_button)" in function_source
 
 def test_exchange_formats_and_gemini_transport_are_independent() -> None:
     from local_ai_bridge.ui.settings_actions import SettingsActionsMixin
@@ -149,6 +169,11 @@ def test_preferred_web_ai_applies_presets_and_keeps_custom_flow() -> None:
     assert window.settings.markdown_exchange_mode is False
     assert window.settings.textual_file_operations_mode is True
 
+    window.set_preferred_web_ai("deepseek")
+    assert window.settings.preferred_web_ai == "deepseek"
+    assert window.settings.markdown_exchange_mode is True
+    assert window.settings.textual_file_operations_mode is True
+
     window.set_preferred_web_ai("custom", custom_flow=(True, False))
     assert window.settings.preferred_web_ai == "custom"
     assert window.settings.markdown_exchange_mode is True
@@ -168,6 +193,15 @@ def test_new_settings_labels_are_translated() -> None:
     assert tr("Seleziona modello preferito:") == "Select preferred model:"
     assert tr("Formato dei file richiesti") == "Requested files format"
     assert tr("Formato delle modifiche proposte") == "Proposed changes format"
+    assert tr("Contesti aggiuntivi per il Super-Report") == "Additional Super-Report contexts"
+    assert tr("Scegli la cartella che conterrà “{name}”") == "Choose the folder that will contain “{name}”"
+    assert (
+        tr(
+            "Esiste già una cartella con questo nome. "
+            "Seleziona una cartella superiore, usa “Apri progetto…” oppure scegli un altro nome."
+        )
+        == "A folder with this name already exists. Select a parent folder, use “Open project…”, or choose another name."
+    )
     configure_language("it")
 
 
@@ -225,6 +259,9 @@ def test_advanced_tab_contains_optional_browser_extension_settings() -> None:
     assert "browser_extension_auto_export_check" in source
     assert "browser_extension_auto_download_check" in source
     assert "La sottocartella degli ZIP si configura nelle opzioni" in source
+    assert "L’estensione funziona correttamente solo quando il server Web BridgAI è avviato" in source
+    assert "sys.platform == 'win32'" in source
+    assert "start_browser_extension_web_server" in source
     assert "Gli aggiornamenti non vengono mai applicati automaticamente" in source
 
 
@@ -334,16 +371,22 @@ def test_simple_mode_switches_between_zip_and_text_update_inputs() -> None:
     from local_ai_bridge.ui import main_window
 
     source = Path(main_window.__file__).read_text(encoding="utf-8")
+    manager_source = Path(
+        main_window.__file__
+    ).parent.joinpath(
+        "layout_managers", "simple_mode_manager.py"
+    ).read_text(encoding="utf-8")
     method = source[
         source.index("    def apply_simple_mode"):source.index(
             "    def _auto_copy_report_in_simple_mode"
         )
     ]
-    assert "markdown_files = simple and bool(self.settings.markdown_exchange_mode)" in method
-    assert "text_updates = bool(self.settings.textual_file_operations_mode)" in method
-    assert "self.text_result_group.setVisible(text_updates)" in method
-    assert "self.simple_apply_zip_button.setVisible(simple and not text_updates)" in method
-    assert "self.simple_prepare_files_button.setText" in method
+    assert "simple_mode_manager = SimpleModeManager(self)" in method
+    assert '"markdown_files": markdown_files' in method
+    assert '"text_updates": bool(self.settings.textual_file_operations_mode)' in method
+    assert "self.window.text_result_group.setVisible(text_updates)" in manager_source
+    assert "self.window.simple_apply_zip_button.setVisible(simple and not text_updates)" in manager_source
+    assert "self.window.simple_prepare_files_button.setText" in manager_source
 
 
 def test_desktop_markdown_update_mode_exposes_file_and_manual_paths() -> None:
@@ -371,39 +414,31 @@ def test_desktop_markdown_update_mode_exposes_file_and_manual_paths() -> None:
     assert "self._set_text_update_path(path)" in main_source
 
 
-def test_primary_mode_settings_and_operations_screen_are_separate() -> None:
+def test_ai_task_assistant_is_available_in_setup_and_settings() -> None:
     from local_ai_bridge.ui import application_modes, main_window
-    from local_ai_bridge.ui.tabs import operations, operations_secondary, settings as settings_tab
+    from local_ai_bridge.ui.tabs import operations, settings as settings_tab
 
     settings_source = Path(settings_tab.__file__).read_text(encoding="utf-8")
-    operations_source = (
-        Path(operations.__file__).read_text(encoding="utf-8")
-        + Path(operations_secondary.__file__).read_text(encoding="utf-8")
-    )
+    operations_source = Path(operations.__file__).read_text(encoding="utf-8")
     selection_source = Path(application_modes.__file__).read_text(encoding="utf-8")
     main_source = Path(main_window.__file__).read_text(encoding="utf-8")
 
     assert "_section('Modalità principale')" in settings_source
     assert "primary_mode_combo" in settings_source
-    assert "'development'" in settings_source
-    assert "'operations'" in settings_source
-    assert "def choose_initial_setup" in selection_source
-    assert "def choose_initial_primary_mode" in selection_source
-    assert "Come vuoi usare BridgAI?" in selection_source
-    assert "Modalità di utilizzo:" in selection_source
-    assert "AI Web preferita:" in selection_source
-    assert "PREFERRED_WEB_AI_CHATGPT" in selection_source
-    assert "PREFERRED_WEB_AI_CLAUDE" in selection_source
-    assert "PREFERRED_WEB_AI_GEMINI" in selection_source
-    assert "PREFERRED_WEB_AI_CUSTOM" in selection_source
-    assert "choose_initial_setup(self)" in main_source
-    assert "primary_mode, preferred_web_ai = result" in main_source
-    assert "preferred_web_ai_exchange_formats(preferred_web_ai)" in main_source
-    assert "def build_operations_tab" in operations_source
-    assert "File autorizzati" in operations_source
-    assert "Invio e verifica" in operations_source
-    assert "self.operations_tab = build_operations_tab(self)" in main_source
-    assert "self._ensure_primary_mode()" in main_source
+    assert "mode_combo" in selection_source
+    assert "Assistente Attività AI" in selection_source
+    assert "return str(mode_combo.currentData())" in selection_source
+    assert "self.settings.primary_mode = primary_mode" in main_source
+    assert "Assistente Attività AI" in operations_source
+    assert "Il progetto locale è facoltativo" in operations_source
+    assert "Prepara richiesta e apri l’AI" in operations_source
+    manager_source = Path(
+        main_window.__file__
+    ).parent.joinpath(
+        "layout_managers", "simple_mode_manager.py"
+    ).read_text(encoding="utf-8")
+    assert "self.tabs.addTab(self.operations_tab, _('Attività AI'))" in main_source
+    assert "self.window.project_panel.setVisible(True)" in manager_source
     assert "self.settings.primary_mode == OPERATIONS_MODE" in main_source
 
 
@@ -437,7 +472,7 @@ def test_primary_mode_change_is_persisted_and_applied_immediately() -> None:
     assert window.settings.primary_mode == OPERATIONS_MODE
     assert window.settings_store.saved_modes == [OPERATIONS_MODE]
     assert window.applied == 1
-    assert "Operativa" in window.status
+    assert "Attività AI" in window.status
 
 
 def test_primary_mode_labels_are_bilingual() -> None:
@@ -445,10 +480,9 @@ def test_primary_mode_labels_are_bilingual() -> None:
 
     configure_language("en")
     assert tr("Modalità principale") == "Primary mode"
-    assert tr("Modalità Sviluppo") == "Development Mode"
-    assert tr("Modalità Operativa") == "Operations Mode"
-    assert tr("Come vuoi usare BridgAI?") == "How do you want to use BridgAI?"
-    assert tr("Modalità di utilizzo:") == "Usage mode:"
+    assert tr("Sviluppo software") == "Software Development"
+    assert tr("Assistente Attività AI") == "AI Task Assistant"
+    assert tr("Attività AI") == "AI Tasks"
     assert tr("AI Web preferita:") == "Preferred Web AI:"
     configure_language("it")
 
@@ -565,6 +599,7 @@ def test_exchange_formats_expose_collapsible_web_ai_compatibility_table() -> Non
     assert "compatibility_panel.setVisible(False)" in settings_source
     assert "'Compatibilità con le AI Web'" in settings_source
     assert "<b>Gemini Pro</b>" in settings_source
+    assert "DeepSeek" in settings_source
     assert "<b>Perplexity</b>" in settings_source
     assert "<b>Microsoft Copilot</b>" in settings_source
     assert "ZIP → ZIP è il flusso consigliato ed è l’unico verificato come pienamente funzionante." in settings_source
@@ -582,7 +617,7 @@ def test_preferences_can_reopen_initial_setup_wizard() -> None:
 
     main_source = Path(main_window.__file__).read_text(encoding="utf-8")
     assert "def reopen_initial_setup(self) -> None:" in main_source
-    assert "current_mode=self.settings.primary_mode" in main_source
+    assert "current_mode=self.settings.primary_mode" not in main_source
     assert "current_provider=self.settings.preferred_web_ai" in main_source
     assert "allow_cancel=True" in main_source
 
@@ -603,3 +638,104 @@ def test_reopen_initial_setup_labels_are_translated() -> None:
     )
     assert tr("Configurazione iniziale aggiornata.") == "Initial setup updated."
     configure_language("it")
+
+
+def test_anonymous_ai_controls_and_url_rewriting_are_removed() -> None:
+    from local_ai_bridge.ui.tabs import settings as settings_tab
+    from local_ai_bridge.ui import workflow_actions
+
+    settings_source = Path(settings_tab.__file__).read_text(encoding="utf-8")
+    workflow_source = (
+        Path(__file__).parents[1]
+        / "src"
+        / "local_ai_bridge"
+        / "ui"
+        / "tabs"
+        / "workflow.py"
+    ).read_text(encoding="utf-8")
+    actions_source = Path(workflow_actions.__file__).read_text(encoding="utf-8")
+
+    assert "open_ai_anonymously" not in settings_source
+    assert "open_ai_anonymously" not in workflow_source
+    assert "temporary_chat_url" not in actions_source
+    assert "return url" in actions_source
+
+def test_publication_tab_shows_project_applied_patch_history() -> None:
+    from local_ai_bridge.ui.tabs import publication
+    from local_ai_bridge.ui import github_actions
+
+    publication_source = Path(publication.__file__).read_text(encoding="utf-8")
+    function_source = publication_source[publication_source.index("def build_publication_tab"):]
+    assert "Modifiche applicate a questo progetto" in function_source
+    assert "publication_applied_history" in function_source
+    assert "QTextEdit" in function_source
+    assert "patch/ZIP applicati al progetto aperto" in function_source
+
+    actions_source = Path(github_actions.__file__).read_text(encoding="utf-8")
+    assert "def _refresh_publication_applied_history" in actions_source
+    assert "iter_for_workspace(workspace)" in actions_source
+    assert "Nessuna modifica applicata registrata per questo progetto." in actions_source
+    assert "_publication_history_text" in actions_source
+
+
+def test_publication_history_labels_are_translated() -> None:
+    from local_ai_bridge.i18n import configure_language, tr
+
+    configure_language("en")
+    assert tr("Modifiche applicate a questo progetto") == "Changes applied to this project"
+    assert tr("Mostra lo storico delle patch/ZIP applicati al progetto aperto: data, ora, messaggio e file modificati.") == "Shows the history of patches/ZIPs applied to the open project: date, time, message, and changed files."
+    assert tr("Nessuna modifica applicata registrata per questo progetto.") == "No applied changes are recorded for this project."
+    configure_language("it")
+
+
+def test_new_project_uses_selected_empty_folder_when_name_matches(tmp_path: Path) -> None:
+    from local_ai_bridge.ui.main_window import _new_project_path
+
+    selected = tmp_path / "pippo"
+    selected.mkdir()
+
+    assert _new_project_path(selected, "pippo") == selected.resolve()
+
+
+def test_new_project_refuses_non_empty_matching_folder(tmp_path: Path) -> None:
+    import pytest
+    from local_ai_bridge.ui.main_window import _new_project_path
+
+    selected = tmp_path / "pippo"
+    selected.mkdir()
+    (selected / "file.txt").write_text("existing", encoding="utf-8")
+
+    with pytest.raises(FileExistsError):
+        _new_project_path(selected, "pippo")
+
+
+def test_new_project_dialog_explains_parent_folder_selection() -> None:
+    from local_ai_bridge.ui import main_window
+
+    source = Path(main_window.__file__).read_text(encoding="utf-8")
+    create_source = source[source.index("    def create_workspace"):source.index("    def choose_workspace")]
+
+    assert "QInputDialog.getText" in create_source
+    assert "QFileDialog.getExistingDirectory" in create_source
+    assert create_source.index("QInputDialog.getText") < create_source.index("QFileDialog.getExistingDirectory")
+    assert "Scegli la cartella che conterrà “{name}”" in create_source
+    assert "_new_project_path(Path(parent), project_name)" in create_source
+
+
+def test_workflow_text_areas_use_hover_clear_controls() -> None:
+    from local_ai_bridge.ui.tabs import workflow
+
+    source = Path(workflow.__file__).read_text(encoding="utf-8")
+    assert "window.task_edit = ClearablePlainTextEdit" in source
+    assert "window.response_edit = ClearablePlainTextEdit" in source
+    assert source.count("clear_tooltip=_('Svuota il campo')") == 2
+
+
+def test_clearable_plain_text_edit_button_is_subtle_and_clears_content() -> None:
+    from local_ai_bridge.ui import widgets
+
+    source = Path(widgets.__file__).read_text(encoding="utf-8")
+    assert "class ClearablePlainTextEdit(QPlainTextEdit)" in source
+    assert "self._clear_button.clicked.connect(self.clear)" in source
+    assert "has_content and hovered" in source
+    assert "foreground.setAlpha(220 if hovered else 105)" in source

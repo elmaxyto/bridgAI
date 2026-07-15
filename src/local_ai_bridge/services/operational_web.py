@@ -20,6 +20,7 @@ from local_ai_bridge.services.operational_missions import (
     CATEGORY_IMAGES,
     CATEGORY_PRESENTATIONS,
     CATEGORY_SPREADSHEETS,
+    CATEGORY_TRANSLATION,
     CATEGORY_WRITING,
     OperationalMission,
 )
@@ -51,6 +52,7 @@ _CATEGORY_HINTS_IT = {
     CATEGORY_IMAGES: "Crea o modifica immagini e materiali grafici secondo la richiesta.",
     CATEGORY_WRITING: "Prepara testi, relazioni o riepiloghi basandoti esclusivamente sui materiali allegati.",
     CATEGORY_FILE_ORGANIZATION: "Organizza e rinomina logicamente copie dei file senza alterare gli originali.",
+    CATEGORY_TRANSLATION: "Traduci i contenuti preservando significato, tono, struttura e terminologia.",
     CATEGORY_CUSTOM: "Svolgi la richiesta usando esclusivamente i materiali autorizzati nello ZIP.",
 }
 _CATEGORY_HINTS_EN = {
@@ -60,6 +62,7 @@ _CATEGORY_HINTS_EN = {
     CATEGORY_IMAGES: "Create or edit images and graphic materials according to the request.",
     CATEGORY_WRITING: "Prepare text, reports, or summaries using only the attached materials.",
     CATEGORY_FILE_ORGANIZATION: "Organize and logically rename copies of files without changing the originals.",
+    CATEGORY_TRANSLATION: "Translate the content while preserving meaning, tone, structure, and terminology.",
     CATEGORY_CUSTOM: "Carry out the request using only the authorized materials in the ZIP.",
 }
 
@@ -120,6 +123,7 @@ def build_operational_mission_package(
         "schema": PACKAGE_SCHEMA,
         "mission_id": mission.mission_id,
         "category": mission.work_category,
+        "superpower_id": mission.superpower_id,
         "provider": mission.provider,
         "generated_at": generated_at,
         "request": mission.original_request,
@@ -195,6 +199,7 @@ def _instructions_document(
 
 Mission ID: `{mission.mission_id}`  
 Category: `{mission.work_category}`  
+Approach: `{mission.superpower_id or "automatic"}`  
 Generated: `{generated_at}`
 
 ## Requested result
@@ -215,6 +220,7 @@ Generated: `{generated_at}`
 
 ID missione: `{mission.mission_id}`  
 Categoria: `{mission.work_category}`  
+Approccio: `{mission.superpower_id or "automatico"}`  
 Generata: `{generated_at}`
 
 ## Risultato richiesto

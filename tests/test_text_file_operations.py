@@ -69,6 +69,24 @@ END_FILE
     assert (tmp_path / "delete.txt").read_text(encoding="utf-8") == "obsolete\n"
 
 
+def test_text_file_operations_reject_commit_message_as_project_file(
+    tmp_path: Path,
+) -> None:
+    response = '''
+BEGIN_FILE commit-message.md
+OPERATION: CREATE
+FINAL_NEWLINE: YES
+CONTENT:
+```markdown
+feat: should be metadata
+```
+END_FILE commit-message.md
+'''
+
+    with pytest.raises(ValueError, match="metadato BridgAI"):
+        inspect_text_file_operations(tmp_path, response)
+
+
 def test_text_file_operations_preserve_requested_final_newline(tmp_path: Path) -> None:
     response = '''
 BEGIN_FILE
@@ -379,3 +397,250 @@ END_FILE
 '''
     with pytest.raises(TextFileOperationsParseError, match="fuori da un blocco"):
         parse_text_file_operations(response)
+
+
+def test_text_file_operations_recovers_missing_end_after_closed_fence(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "existing.txt"
+    target.write_text("old\n", encoding="utf-8")
+    response = '''Ecco la modifica:
+BEGIN_FILE existing.txt
+OPERATION: REPLACE
+CONTENT:
+```text
+new
+```
+Grazie.
+'''
+
+    plan = inspect_text_file_operations(tmp_path, response)
+
+    assert plan.metadata["contents"]["existing.txt"] == b"new\n"
+    assert any("END_FILE assente" in item for item in plan.metadata["normalized_text_formatting"])
+    assert any("formattazione incompleta" in item for item in plan.warnings)
+
+
+def test_text_file_operations_recovers_missing_end_before_next_block(
+    tmp_path: Path,
+) -> None:
+    response = '''BEGIN_FILE first.txt
+OPERATION: CREATE
+CONTENT:
+```text
+one
+```
+BEGIN_FILE second.txt
+OPERATION: CREATE
+CONTENT:
+```text
+two
+```
+'''
+
+    plan = inspect_text_file_operations(tmp_path, response)
+
+    assert plan.metadata["contents"]["first.txt"] == b"one\n"
+    assert plan.metadata["contents"]["second.txt"] == b"two\n"
+    assert [change.target for change in plan.changes] == ["first.txt", "second.txt"]
+    assert sum(
+        "END_FILE assente" in item
+        for item in plan.metadata["normalized_text_formatting"]
+    ) == 2
+
+
+def test_text_file_operations_recovers_missing_code_fence_when_end_is_present(
+    tmp_path: Path,
+) -> None:
+    response = '''BEGIN_FILE broken.txt
+OPERATION: CREATE
+CONTENT:
+```text
+value
+END_FILE
+'''
+
+    plan = inspect_text_file_operations(tmp_path, response)
+
+    assert plan.metadata["contents"]["broken.txt"] == b"value\n"
+    assert any(
+        "fence Markdown non chiusa" in item
+        for item in plan.metadata["normalized_text_formatting"]
+    )
+
+
+def test_text_file_operations_accept_compact_inline_metadata_and_end_path(
+    tmp_path: Path,
+) -> None:
+    existing = tmp_path / "src" / "app.py"
+    existing.parent.mkdir()
+    existing.write_text("VALUE = 1\n", encoding="utf-8")
+    response = '''BEGIN_FILE src/app.py OPERATION: REPLACE FINAL_NEWLINE: YES
+CONTENT:
+```python
+VALUE = 2
+```
+END_FILE src/app.py
+BEGIN_FILE notes.txt CREATE
+FINAL_NEWLINE: NO
+CONTENT:
+```text
+created
+```
+END_FILE notes.txt
+'''
+
+    plan = inspect_text_file_operations(tmp_path, response)
+
+    assert plan.metadata["contents"]["src/app.py"] == b"VALUE = 2\n"
+    assert plan.metadata["contents"]["notes.txt"] == b"created"
+    assert plan.metadata["operations"] == {"create": 1, "replace": 1, "delete": 0}
+    assert any(
+        "metadati letti dal marcatore BEGIN_FILE" in item
+        for item in plan.metadata["normalized_text_formatting"]
+    )
+
+
+def test_text_file_operations_accept_missing_content_before_fence_and_infer_operation(
+    tmp_path: Path,
+) -> None:
+    existing = tmp_path / "existing.txt"
+    existing.write_text("old\n", encoding="utf-8")
+    response = '''BEGIN_FILE existing.txt
+```text
+new
+```
+END_FILE existing.txt
+BEGIN_FILE created.txt
+```text
+created
+```
+END_FILE created.txt
+'''
+
+    plan = inspect_text_file_operations(tmp_path, response)
+
+    assert plan.metadata["contents"]["existing.txt"] == b"new\n"
+    assert plan.metadata["contents"]["created.txt"] == b"created\n"
+    assert plan.metadata["inferred_operations"] == [
+        "existing.txt: REPLACE",
+        "created.txt: CREATE",
+    ]
+    assert plan.metadata["operations"] == {"create": 1, "replace": 1, "delete": 0}
+    assert any("CONTENT assente" in item for item in plan.metadata["normalized_text_formatting"])
+    assert any("OPERATION assente" in item for item in plan.warnings)
+
+
+def test_text_file_operations_rejects_mismatched_end_path() -> None:
+    response = '''BEGIN_FILE a.txt
+OPERATION: CREATE
+CONTENT:
+```text
+value
+```
+END_FILE b.txt
+'''
+
+    with pytest.raises(TextFileOperationsParseError, match="END_FILE dichiara b.txt"):
+        parse_text_file_operations(response)
+
+
+def test_unfenced_content_validates_end_file_target(tmp_path: Path) -> None:
+    document = """
+BEGIN_FILE src/app.py
+OPERATION: REPLACE
+CONTENT:
+print('ok')
+END_FILE src/other.py
+"""
+
+    with pytest.raises(
+        TextFileOperationsParseError,
+        match="END_FILE dichiara src/other.py",
+    ):
+        parse_text_file_operations(document)
+
+
+def test_text_file_operations_marks_inferred_create_as_high_severity(
+    tmp_path: Path,
+) -> None:
+    response = '''BEGIN_FILE created_typo.txt
+```text
+created
+```
+END_FILE created_typo.txt
+'''
+
+    plan = inspect_text_file_operations(tmp_path, response)
+
+    assert plan.metadata["contents"]["created_typo.txt"] == b"created\n"
+    assert plan.metadata["recovery_severity"] == "high"
+    assert plan.metadata["requires_explicit_confirmation"] is True
+    assert any(
+        item.get("action") == "create_inferred_for_missing_target"
+        for item in plan.metadata["recovery_actions"]
+    )
+
+
+def test_text_file_operations_rejects_greedy_fence_after_prose() -> None:
+    response = '''BEGIN_FILE src/app.py
+OPERATION: REPLACE
+Ecco prima un comando da terminale:
+```bash
+pip install example
+```
+CONTENT:
+```python
+print("ok")
+```
+END_FILE src/app.py
+'''
+
+    with pytest.raises(TextFileOperationsParseError, match="campo non riconosciuto"):
+        parse_text_file_operations(response)
+
+
+def test_text_file_operations_marks_unclosed_fence_at_eof_as_high_severity(
+    tmp_path: Path,
+) -> None:
+    response = '''BEGIN_FILE notes.txt
+OPERATION: CREATE
+CONTENT:
+```text
+value
+Fammi sapere se vuoi altro.
+'''
+
+    plan = inspect_text_file_operations(tmp_path, response)
+
+    assert plan.metadata["recovery_severity"] == "high"
+    assert plan.metadata["requires_explicit_confirmation"] is True
+    assert any(
+        item.get("action") == "missing_code_fence"
+        for item in plan.metadata["recovery_actions"]
+    )
+
+
+def test_text_file_operations_keeps_diff_for_invalid_python_with_high_severity(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "app.py").write_text("VALUE = 1\n", encoding="utf-8")
+    response = '''BEGIN_FILE app.py
+OPERATION: REPLACE
+CONTENT:
+```python
+def broken(:
+```
+END_FILE app.py
+'''
+
+    plan = inspect_text_file_operations(tmp_path, response)
+
+    assert "def broken" in plan.diff
+    assert plan.metadata["recovery_severity"] == "high"
+    assert plan.metadata["requires_explicit_confirmation"] is True
+    assert plan.metadata["syntax_error_targets"] == ["app.py"]
+    assert any(
+        item.get("action") == "python_syntax_error"
+        for item in plan.metadata["recovery_actions"]
+    )

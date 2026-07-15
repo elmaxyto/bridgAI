@@ -127,6 +127,75 @@ def git_has_commits(workspace: Path) -> bool:
     return result.returncode == 0
 
 
+def _git_config_value(workspace: Path, key: str) -> str | None:
+    if not git_available():
+        raise GitIntegrationError("Git non è installato o non è presente nel PATH.")
+    if not is_git_repository(workspace):
+        raise GitIntegrationError("Il workspace non è ancora un repository Git.")
+    try:
+        result = subprocess.run(
+            ["git", "config", "--get", key],
+            cwd=workspace,
+            capture_output=True,
+            text=True,
+            errors="replace",
+            timeout=20,
+            check=False,
+        )
+    except FileNotFoundError as exc:
+        raise GitIntegrationError("Git non è installato o non è presente nel PATH.") from exc
+    except subprocess.TimeoutExpired as exc:
+        raise GitIntegrationError("Lettura della configurazione Git scaduta.") from exc
+    except OSError as exc:
+        raise GitIntegrationError(f"Impossibile leggere la configurazione Git: {exc}") from exc
+    if result.returncode == 1:
+        return None
+    if result.returncode != 0:
+        detail = _output(result) or f"codice di uscita {result.returncode}"
+        raise GitIntegrationError(f"Git non ha letto {key}: {detail}")
+    return (result.stdout or "").strip() or None
+
+
+def git_author_identity(workspace: Path) -> tuple[str | None, str | None]:
+    """Return the effective Git author name and email for the workspace."""
+    return (
+        _git_config_value(workspace, "user.name"),
+        _git_config_value(workspace, "user.email"),
+    )
+
+
+def _validate_identity_value(value: str, label: str) -> str:
+    normalized = value.strip()
+    if not normalized or "\n" in normalized or "\r" in normalized or "\x00" in normalized:
+        raise GitIntegrationError(f"{label} Git non valido.")
+    return normalized
+
+
+def ensure_git_author_identity(workspace: Path, *, name: str, email: str) -> str:
+    """Fill missing author fields locally without overriding existing Git settings."""
+    current_name, current_email = git_author_identity(workspace)
+    updates: list[str] = []
+    if current_name is None:
+        safe_name = _validate_identity_value(name, "Nome autore")
+        _run_command(
+            ["git", "config", "--local", "user.name", safe_name],
+            cwd=workspace,
+            timeout=20,
+        )
+        updates.append("nome")
+    if current_email is None:
+        safe_email = _validate_identity_value(email, "Email autore")
+        _run_command(
+            ["git", "config", "--local", "user.email", safe_email],
+            cwd=workspace,
+            timeout=20,
+        )
+        updates.append("email")
+    if not updates:
+        return ""
+    return "Identità autore Git configurata localmente: " + " e ".join(updates) + "."
+
+
 def git_current_branch(workspace: Path) -> str:
     if not is_git_repository(workspace):
         raise GitIntegrationError("Il workspace non è ancora un repository Git.")
@@ -168,7 +237,7 @@ def _git_lines(workspace: Path, args: list[str]) -> list[str]:
         raise GitIntegrationError("Git non è installato o non è presente nel PATH.")
     if not is_git_repository(workspace):
         raise GitIntegrationError("Il workspace non è ancora un repository Git.")
-    output = _run_command(["git", *args], cwd=workspace, timeout=30, check=False)
+    output = _run_command(["git", *args], cwd=workspace, timeout=30)
     if output == "Operazione completata.":
         return []
     return [line for line in output.splitlines() if line.strip()]

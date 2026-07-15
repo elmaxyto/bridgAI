@@ -6,6 +6,7 @@ import zipfile
 from pathlib import Path
 
 from local_ai_bridge.services.exporting import create_export_zip, parse_download_requests
+from local_ai_bridge.services import reporting
 from local_ai_bridge.services.reporting import build_super_report
 
 
@@ -140,7 +141,7 @@ def test_report_identifies_generator_version(tmp_path: Path) -> None:
     )
     report = build_super_report(tmp_path)
     assert "Versione progetto rilevata:** `9.8.7`" in report
-    assert "Generatore report:** `BridgAI 1.1.0`" in report
+    assert "Generatore report:** `BridgAI 1.1.1`" in report
 
 
 def test_download_parse_and_export(tmp_path: Path) -> None:
@@ -178,6 +179,65 @@ def test_download_export_accepts_markdown_rewritten_dunder_path(tmp_path: Path) 
 
     with zipfile.ZipFile(destination) as zf:
         assert zf.namelist() == ["bridgai-project.json", "src/demo/__init__.py"]
+
+def test_download_export_accepts_external_context_request(tmp_path: Path) -> None:
+    from local_ai_bridge.core.settings import AppSettings
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "app.py").write_text("VALUE = 1\n", encoding="utf-8")
+    external = tmp_path / "library"
+    (external / "src").mkdir(parents=True)
+    (external / "src" / "feature.py").write_text(
+        "def reusable_feature():\n    return True\n",
+        encoding="utf-8",
+    )
+
+    requested = parse_download_requests(
+        "#scarica app.py, @context-1:src/feature.py"
+    )
+    destination = tmp_path / "context.zip"
+    create_export_zip(
+        workspace,
+        requested,
+        destination,
+        settings=AppSettings(external_context_paths=[str(external)]),
+    )
+
+    with zipfile.ZipFile(destination) as zf:
+        assert sorted(zf.namelist()) == [
+            "__bridgai_external_contexts__/context-1/src/feature.py",
+            "app.py",
+            "bridgai-project.json",
+        ]
+        assert "reusable_feature" in zf.read(
+            "__bridgai_external_contexts__/context-1/src/feature.py"
+        ).decode("utf-8")
+        metadata = zf.read("bridgai-project.json").decode("utf-8")
+        assert "read-only reference material" in metadata
+
+
+def test_download_export_rejects_external_context_traversal(tmp_path: Path) -> None:
+    from local_ai_bridge.core.settings import AppSettings
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    external = tmp_path / "library"
+    external.mkdir()
+    (tmp_path / "secret.py").write_text("SECRET = True\n", encoding="utf-8")
+
+    try:
+        create_export_zip(
+            workspace,
+            ["@context-1:../secret.py"],
+            tmp_path / "context.zip",
+            settings=AppSettings(external_context_paths=[str(external)]),
+        )
+    except ValueError as exc:
+        assert "Richieste non valide" in str(exc)
+    else:
+        raise AssertionError("external context traversal should be rejected")
+
 
 def test_scanner_does_not_follow_symlink_cycles(tmp_path: Path) -> None:
     project = tmp_path / "project"
@@ -877,6 +937,8 @@ def test_report_text_file_operations_mode_is_explicit_and_optional(tmp_path: Pat
     assert "SEARCH/REPLACE" not in standard
     assert "**FORMATO MODIFICHE — File Markdown di aggiornamento**" not in standard
     assert "**FORMATO MODIFICHE — File Markdown di aggiornamento**" in structured
+    assert "BEGIN_FILE src/esempio.py" in structured
+    assert "END_FILE src/esempio.py" in structured
     assert "OPERATION: REPLACE" in structured
     assert "OPERATION: CREATE" in structured
     assert "OPERATION: DELETE" in structured
@@ -886,6 +948,9 @@ def test_report_text_file_operations_mode_is_explicit_and_optional(tmp_path: Pat
     assert "FINAL_NEWLINE: YES oppure NO" not in structured
     assert "Non racchiudere l'intera risposta" in structured
     assert "non produrre ZIP, non usare SEARCH/REPLACE" in structured
+    assert "<!-- BRIDGAI:FILE commit-message.md -->" in structured
+    assert "BridgAI salverà nella sessione e in `BRIDGAI_HISTORY.md`" in structured
+    assert "Questo blocco è un metadato e non verrà creato nel progetto" in structured
     assert "`bridgai-update.md`" in structured
     assert "crea un singolo file scaricabile" in structured
     assert "usa il copia-incolla soltanto" in structured
@@ -902,6 +967,7 @@ def test_empty_workspace_uses_create_operations_when_text_mode_is_active(tmp_pat
     )
 
     assert "un unico file `bridgai-update.md`" in report
+    assert "blocco metadato `commit-message.md`" in report
     assert "operazioni `CREATE` complete" in report
     assert "Non usare ZIP né `#scarica`" in report
     assert "**Applica ZIP**" not in report
@@ -933,6 +999,7 @@ def test_report_combines_markdown_download_with_text_or_zip_updates(tmp_path: Pa
     assert "**FORMATO FILE RICHIESTI — Markdown**" in markdown_text
     assert "**FORMATO MODIFICHE — File Markdown di aggiornamento**" in markdown_text
     assert "`bridgai-update.md`" in markdown_text
+    assert "<!-- BRIDGAI:FILE commit-message.md -->" in markdown_text
 
 
 def test_gemini_preference_selects_zip_requests_and_markdown_updates(
@@ -953,3 +1020,127 @@ def test_gemini_preference_selects_zip_requests_and_markdown_updates(
 
     assert "**FORMATO FILE RICHIESTI — ZIP**" in report
     assert "**FORMATO MODIFICHE — File Markdown di aggiornamento**" in report
+
+
+def test_report_resolves_project_markdown_superpower(tmp_path: Path) -> None:
+    from local_ai_bridge.core.superpowers import save_superpower
+
+    (tmp_path / "app.py").write_text("VALUE = 1\n", encoding="utf-8")
+    save_superpower(
+        "safe-review",
+        "Revisione sicura",
+        "Controlla compatibilità, sicurezza e test prima di proporre modifiche.",
+        workspace=tmp_path,
+        description="Checklist personalizzata del progetto.",
+    )
+
+    report = build_super_report(tmp_path, "Analizza il progetto @superpower:safe-review")
+
+    assert "## 1.2 Superpoteri Markdown" in report
+    assert "Revisione sicura" in report
+    assert "Checklist personalizzata del progetto." in report
+    assert "Controlla compatibilità, sicurezza e test" in report
+    assert "`.bridgai/superpowers/<id>.md`" in report
+
+
+def test_report_marks_unknown_markdown_superpower(tmp_path: Path) -> None:
+    (tmp_path / "app.py").write_text("VALUE = 1\n", encoding="utf-8")
+
+    report = build_super_report(tmp_path, "Usa @superpotere:non-esiste")
+
+    assert "Non trovati: `non-esiste`." in report
+
+
+def test_report_includes_additional_read_only_context(tmp_path: Path) -> None:
+    from local_ai_bridge.core.settings import AppSettings
+
+    workspace = tmp_path / "current"
+    workspace.mkdir()
+    (workspace / "app.py").write_text("def current():\n    return True\n", encoding="utf-8")
+    external = tmp_path / "library"
+    external.mkdir()
+    (external / "feature.py").write_text(
+        "def reusable_feature():\n    return 'portable'\n",
+        encoding="utf-8",
+    )
+
+    report = build_super_report(
+        workspace,
+        "porta reusable_feature nel progetto corrente",
+        settings=AppSettings(external_context_paths=[str(external)]),
+    )
+
+    assert "## 4.1 Progetti/cartelle di contesto aggiuntivi" in report
+    assert "context-1" in report
+    assert str(external) in report
+    assert "reusable_feature" in report
+    assert "sola lettura" in report
+    assert "#scarica @context-1:percorso/relativo.ext" in report
+    assert "__bridgai_external_contexts__/context-1/..." in report
+    assert "non includerli nello ZIP applicabile" in report
+
+
+def test_report_ignores_duplicate_or_missing_additional_contexts(tmp_path: Path) -> None:
+    from local_ai_bridge.core.settings import AppSettings
+
+    (tmp_path / "app.py").write_text("VALUE = 1\n", encoding="utf-8")
+    missing = tmp_path / "missing"
+
+    report = build_super_report(
+        tmp_path,
+        "analizza",
+        settings=AppSettings(external_context_paths=[str(tmp_path), str(missing)]),
+    )
+
+    assert "si sovrappone al workspace corrente" in report
+    assert "Contesto aggiuntivo non disponibile" in report
+    assert "## 4.1 Progetti/cartelle di contesto aggiuntivi" in report
+
+
+def test_batch_project_reports_zip_contains_one_markdown_per_project(tmp_path: Path, monkeypatch) -> None:
+    root = tmp_path / "projects"
+    alpha = root / "alpha"
+    beta = root / "beta project"
+    alpha.mkdir(parents=True)
+    beta.mkdir()
+    (root / "README.txt").write_text("not a project", encoding="utf-8")
+
+    def fake_report(project: Path, task: str = "", settings=None) -> str:
+        return f"# {project.name}\n\nTask: {task}\n"
+
+    progress_events: list[tuple[int, int, str]] = []
+
+    def progress(index: int, total: int, project: Path) -> None:
+        progress_events.append((index, total, project.name))
+
+    monkeypatch.setattr(reporting, "build_super_report", fake_report)
+    result = reporting.create_batch_project_reports_zip(
+        root,
+        task="batch task",
+        progress_callback=progress,
+    )
+
+    assert progress_events == [(1, 2, "alpha"), (2, 2, "beta project")]
+    assert result.path.parent == root
+    assert result.path.name.startswith("bridgai-project-reports-")
+    assert result.projects == ["alpha", "beta project"]
+    with zipfile.ZipFile(result.path) as archive:
+        names = set(archive.namelist())
+        assert "README.md" in names
+        assert "alpha.md" in names
+        assert "beta_project.md" in names
+        assert "README.txt.md" not in names
+        assert "Task: batch task" in archive.read("alpha.md").decode("utf-8")
+
+
+def test_batch_project_reports_rejects_empty_project_root(tmp_path: Path) -> None:
+    root = tmp_path / "projects"
+    root.mkdir()
+    (root / "file.txt").write_text("not a project", encoding="utf-8")
+
+    try:
+        reporting.create_batch_project_reports_zip(root)
+    except ValueError as exc:
+        assert "non contiene cartelle" in str(exc)
+    else:
+        raise AssertionError("Expected empty project root to be rejected")

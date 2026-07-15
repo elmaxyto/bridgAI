@@ -16,6 +16,7 @@ OPERATIONS_MODE = "operations"
 PRIMARY_MODES = (DEVELOPMENT_MODE, OPERATIONS_MODE)
 LEGACY_PRIMARY_MODE = DEVELOPMENT_MODE
 MAX_RECENT_WORKSPACES = 10
+MAX_EXTERNAL_CONTEXT_PATHS = 8
 AI_ASSISTANT_SOURCES = ("gemma_internal", "ollama", "cloud_provider")
 AI_ASSISTANT_CLOUD_PROVIDERS = (
     "groq",
@@ -27,11 +28,13 @@ AI_ASSISTANT_CLOUD_PROVIDERS = (
 PREFERRED_WEB_AI_CHATGPT = "chatgpt"
 PREFERRED_WEB_AI_CLAUDE = "claude"
 PREFERRED_WEB_AI_GEMINI = "gemini"
+PREFERRED_WEB_AI_DEEPSEEK = "deepseek"
 PREFERRED_WEB_AI_CUSTOM = "custom"
 PREFERRED_WEB_AI_VALUES = (
     PREFERRED_WEB_AI_CHATGPT,
     PREFERRED_WEB_AI_CLAUDE,
     PREFERRED_WEB_AI_GEMINI,
+    PREFERRED_WEB_AI_DEEPSEEK,
     PREFERRED_WEB_AI_CUSTOM,
 )
 
@@ -90,6 +93,8 @@ class AppSettings:
     web_totp_local_bypass: bool = False
     web_totp_last_counter: int = -1
     web_totp_recovery_hashes: list[str] = field(default_factory=list)
+    windows_show_diagnostic_consoles: bool = False
+    external_context_paths: list[str] = field(default_factory=list)
 
 
 def normalize_recent_workspaces(
@@ -97,6 +102,32 @@ def normalize_recent_workspaces(
     limit: int = MAX_RECENT_WORKSPACES,
 ) -> list[str]:
     """Return a clean, ordered, duplicate-free recent workspace list."""
+    if not isinstance(value, list) or limit <= 0:
+        return []
+
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for item in value:
+        if not isinstance(item, str):
+            continue
+        path = item.strip()
+        if not path:
+            continue
+        key = os.path.normcase(os.path.normpath(path))
+        if key in seen:
+            continue
+        seen.add(key)
+        normalized.append(path)
+        if len(normalized) >= limit:
+            break
+    return normalized
+
+
+def normalize_external_context_paths(
+    value: object,
+    limit: int = MAX_EXTERNAL_CONTEXT_PATHS,
+) -> list[str]:
+    """Return a clean, ordered, duplicate-free list of extra context roots."""
     if not isinstance(value, list) or limit <= 0:
         return []
 
@@ -145,6 +176,8 @@ def preferred_web_ai_exchange_formats(value: object) -> tuple[bool, bool] | None
         return False, False
     if preferred == PREFERRED_WEB_AI_GEMINI:
         return False, True
+    if preferred == PREFERRED_WEB_AI_DEEPSEEK:
+        return True, True
     return None
 
 
@@ -176,6 +209,9 @@ class SettingsStore:
             values["recent_workspaces"] = normalize_recent_workspaces(
                 values.get("recent_workspaces", [])
             )
+            values["external_context_paths"] = normalize_external_context_paths(
+                values.get("external_context_paths", [])
+            )
             preferred_web_ai = normalize_preferred_web_ai(
                 data.get("preferred_web_ai"),
                 PREFERRED_WEB_AI_CUSTOM,
@@ -187,6 +223,8 @@ class SettingsStore:
                 values["markdown_exchange_mode"] = False
             if not isinstance(values.get("textual_file_operations_mode", False), bool):
                 values["textual_file_operations_mode"] = False
+            if not isinstance(values.get("windows_show_diagnostic_consoles", False), bool):
+                values["windows_show_diagnostic_consoles"] = False
             preferred_formats = preferred_web_ai_exchange_formats(preferred_web_ai)
             if preferred_formats is not None:
                 (

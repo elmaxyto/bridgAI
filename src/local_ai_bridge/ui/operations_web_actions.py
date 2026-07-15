@@ -37,84 +37,52 @@ GEMINI_URL = "https://gemini.google.com/"
 
 class OperationsWebActionsMixin:
     def start_operational_web_mission(self) -> None:
-        inputs = self._operational_input_paths()
         request = self.operations_request_edit.toPlainText().strip()
-        output = self.operations_output_edit.text().strip()
-        if not request or not inputs or not output:
+        if not request:
             QMessageBox.warning(
                 self,
-                _("Missione non pronta"),
-                _("Descrivi il lavoro, aggiungi almeno un input e scegli la cartella risultati."),
+                _("Attività non pronta"),
+                _("Descrivi prima cosa vuoi realizzare."),
             )
             return
         provider = self._selected_operational_provider()
-        listed = "\n".join(f"• {Path(path).name or path}" for path in inputs[:20])
-        if len(inputs) > 20:
-            listed += "\n" + _("…e altri {count} input.").format(count=len(inputs) - 20)
-        answer = QMessageBox.question(
-            self,
-            _("Invia la missione all’AI Web"),
-            _(
-                "I file elencati verranno copiati in uno ZIP e caricati su {provider}. "
-                "Gli originali locali non saranno modificati. Procedere?"
-            ).format(provider=provider_label(provider))
-            + "\n\n"
-            + listed,
-        )
-        if answer != QMessageBox.StandardButton.Yes:
-            return
-        try:
-            mission = self._create_operational_mission(procedure_id=PROCEDURE_WEB_MISSION)
-            package = build_operational_mission_package(
-                mission,
-                language=current_language(),
+        superpower = self._selected_operational_superpower()
+        if current_language() == "en":
+            prompt = (
+                "You are the AI Task Assistant for the following activity.\n\n"
+                f"USER GOAL:\n{request}\n\n"
+                "Before producing the final result, understand the goal and ask only for the "
+                "clarifications and attachments that are genuinely necessary. Clearly specify "
+                "which documents, PDFs, images, spreadsheets, data, or examples the user should "
+                "attach directly in this chat. Do not ask for local paths, technical folders, or "
+                "unnecessary setup. When enough material is available, briefly confirm what you "
+                "will create and proceed with a high-quality result."
             )
-            running = mission.transition(MISSION_RUNNING)
-            self.mission_store.save(running)
-        except (MissionError, OperationalWebError, OSError) as exc:
-            QMessageBox.warning(self, _("Impossibile preparare la missione"), str(exc))
-            return
-
-        automatic = bool(
-            provider == PROVIDER_CHATGPT
-            and self.settings.browser_extension_enabled
-            and self.settings.browser_extension_auto_send
-        )
-        if automatic:
-            try:
-                if not self.ensure_browser_extension_service(silent=True):
-                    raise RuntimeError(_("Il servizio dell’estensione non è disponibile."))
-                queue_operational_request(
-                    package.path.parent,
-                    package.prompt,
-                    mission_id=running.mission_id,
-                    context_zip=package.path,
-                    provider=provider,
-                )
-                message = _(
-                    "Missione affidata all’estensione Chrome. ChatGPT riceverà "
-                    "automaticamente lo ZIP."
-                )
-            except Exception as exc:
-                automatic = False
-                message = _(
-                    "Invio automatico non disponibile; continua manualmente: {error}"
-                ).format(error=exc)
-        if not automatic:
-            QApplication.clipboard().setText(package.prompt)
-            self._open_operational_provider(provider)
-            QDesktopServices.openUrl(QUrl.fromLocalFile(str(package.path.parent)))
-            message = _(
-                "Il prompt è negli appunti e la cartella del pacchetto è stata aperta. "
-                "Allega lo ZIP alla chat; al termine importa lo ZIP dei risultati in BridgAI."
+        else:
+            prompt = (
+                "Sei l’Assistente Attività AI per il seguente lavoro.\n\n"
+                f"OBIETTIVO DELL’UTENTE:\n{request}\n\n"
+                "Prima di produrre il risultato finale, comprendi l’obiettivo e chiedi soltanto "
+                "i chiarimenti e gli allegati realmente necessari. Specifica chiaramente quali "
+                "documenti, PDF, immagini, fogli di calcolo, dati o esempi l’utente deve allegare "
+                "direttamente in questa chat. Non chiedere percorsi locali, cartelle tecniche o "
+                "configurazioni non indispensabili. Quando hai materiale sufficiente, conferma "
+                "brevemente cosa realizzerai e procedi con un risultato di qualità."
             )
-
-        self.refresh_operational_missions(select_mission_id=running.mission_id)
-        self.operations_web_status.setPlainText(
-            message + "\n\n" + _("Pacchetto missione:") + f"\n{package.path}"
+        if superpower is not None:
+            prompt += (
+                f"\n\nGUIDED PROMPT: {superpower.title} "
+                f"(@superpower:{superpower.superpower_id})\n\n"
+                f"{superpower.instructions}"
+            )
+        QApplication.clipboard().setText(prompt)
+        self._open_operational_provider(provider)
+        message = _(
+            "Prompt guidato copiato negli appunti. Incollalo nella chat e allega direttamente "
+            "nell’interfaccia Web soltanto i materiali che l’AI ti richiederà."
         )
+        self.operations_web_status.setPlainText(message)
         self._show_status(message)
-        self.clear_operational_mission_form()
 
     def _open_operational_provider(self, provider: str) -> None:
         if provider == PROVIDER_GEMINI:

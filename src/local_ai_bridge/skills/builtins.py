@@ -4,6 +4,7 @@ from pathlib import Path
 
 from local_ai_bridge.core.models import SkillResult
 from local_ai_bridge.core.skills import SkillContext, SkillRegistry, SkillSpec
+from local_ai_bridge.core.superpowers import list_superpowers, superpowers_markdown
 from local_ai_bridge.services.commit_history import commit_history_markdown
 from local_ai_bridge.services.exporting import create_export_zip
 from local_ai_bridge.services.git import git_status
@@ -18,6 +19,41 @@ def _workspace(context: SkillContext) -> Path:
 
 
 def register_builtin_skills(registry: SkillRegistry) -> None:
+    registry.register(
+        SkillSpec(
+            "superpowers.list",
+            "Elenca superpoteri Markdown",
+            "Elenca i superpoteri globali e del progetto disponibili.",
+            frozenset({"workspace.read"}),
+            lambda ctx, p: SkillResult(
+                True,
+                "Superpoteri caricati.",
+                [
+                    {
+                        "id": item.superpower_id,
+                        "title": item.title,
+                        "description": item.description,
+                        "scope": item.scope,
+                        "path": str(item.path),
+                    }
+                    for item in list_superpowers(_workspace(ctx))
+                ],
+            ),
+        )
+    )
+    registry.register(
+        SkillSpec(
+            "superpowers.render",
+            "Richiama superpoteri Markdown",
+            "Risolve i richiami @superpower:id per il progetto corrente.",
+            frozenset({"workspace.read"}),
+            lambda ctx, p: SkillResult(
+                True,
+                "Superpoteri risolti.",
+                superpowers_markdown(_workspace(ctx), str(p.get("task", ""))),
+            ),
+        )
+    )
     registry.register(
         SkillSpec(
             "report.generate",

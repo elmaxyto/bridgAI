@@ -4,6 +4,7 @@ import platform
 import threading
 
 from local_ai_bridge.i18n import tr as _
+from local_ai_bridge.ui.widgets import IconButton
 from PySide6.QtCore import QObject, Qt, Signal
 from PySide6.QtWidgets import (
     QDialog,
@@ -88,8 +89,7 @@ class SpeechDialog(QDialog):
 
         controls = QHBoxLayout()
         controls.setSpacing(10)
-        self.start_button = QPushButton("🎙")
-        self.start_button.setProperty("role", "icon")
+        self.start_button = IconButton("microphone")
         self.start_button.setAccessibleName(_("Avvia dettatura"))
         self.start_button.setToolTip(_("Avvia dettatura"))
         self.start_button.clicked.connect(self.start_recording)
@@ -116,7 +116,7 @@ class SpeechDialog(QDialog):
         return self.preview.toPlainText().strip()
 
     def _sync_insert_state(self) -> None:
-        self.insert_button.setEnabled(bool(self.transcript()) and not self.recorder.is_recording())
+        self.insert_button.setEnabled(bool(self.transcript()) and not self.recorder.is_recording)
 
     def start_recording(self) -> None:
         try:
@@ -147,8 +147,12 @@ class SpeechDialog(QDialog):
     def _transcribe_worker(self, audio: bytes) -> None:
         try:
             text = transcribe_google(audio, self.recorder.sample_rate, self.language)
-        except Exception as exc:
+        except SpeechToTextError as exc:
             self.signals.failed.emit(str(exc))
+        except Exception as exc:
+            self.signals.failed.emit(
+                _("Errore imprevisto durante la trascrizione: {error}").format(error=exc)
+            )
         else:
             self.signals.completed.emit(text)
 

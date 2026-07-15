@@ -12,6 +12,26 @@ The format is inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0
 - Broader cross-platform GUI validation
 - Packaged desktop distributions
 
+## [1.1.1] - 2026-07-07
+
+### Added
+
+- App-wide and project Markdown superpowers with indexing, default bundled profiles, desktop/Web selection, and `@superpower` references in reports.
+- Project notes with desktop/Web access for durable per-workspace reminders and TODOs.
+- Browser extension provider support split from the legacy single-provider flow.
+
+### Changed
+
+- Refined the simple/development/operational mode experience, setup reopening, settings grouping, and compatibility guidance for Web AI workflows.
+- Improved Super-Report context quality, candidate selection, Git status reporting, and requested-file coverage explanations.
+- Strengthened browser automation, extension wake-up behavior, download handling, and Windows direct Web server startup.
+- Updated README, deployment, launcher, and operational documentation for the current 1.1.x workflow.
+
+### Fixed
+
+- Improved text-file operation parsing and shared text utilities used by update analysis.
+- Added regression coverage for superpowers, project notes, operational UI, browser extension flows, settings, and report generation.
+
 ## [1.1.0] - 2026-06-28
 
 ### Added

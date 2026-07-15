@@ -29,6 +29,27 @@ MARKER_HINT = re.compile(
     re.IGNORECASE,
 )
 
+_SEVERITY_RANK = {"none": 0, "low": 1, "medium": 2, "high": 3}
+
+
+def _stronger_severity(current: str, candidate: str) -> str:
+    return candidate if _SEVERITY_RANK[candidate] > _SEVERITY_RANK[current] else current
+
+
+def _recovery_action(
+    action: str,
+    severity: str,
+    *,
+    target: str = "",
+    detail: str = "",
+) -> dict[str, str]:
+    item = {"action": action, "severity": severity}
+    if target:
+        item["target"] = target
+    if detail:
+        item["detail"] = detail
+    return item
+
 
 def _newline_style(text: str) -> str:
     return "\r\n" if text.count("\r\n") > text.count("\n") / 2 else "\n"
@@ -329,6 +350,8 @@ def combine_patch_plans(
     warnings: list[str] = []
     contents: dict[str, bytes] = {}
     total_blocks = 0
+    recovery_actions: list[dict[str, str]] = []
+    recovery_severity = "none"
 
     for plan in plans:
         if plan.plan_type != "patch":
@@ -352,11 +375,27 @@ def combine_patch_plans(
         if plan.diff:
             diff_parts.append(plan.diff.rstrip())
         warnings.extend(plan.warnings)
+        actions = plan.metadata.get("recovery_actions", [])
+        if isinstance(actions, list):
+            recovery_actions.extend(
+                item for item in actions if isinstance(item, dict)
+            )
+        severity = plan.metadata.get("recovery_severity", "none")
+        if isinstance(severity, str) and severity in _SEVERITY_RANK:
+            recovery_severity = _stronger_severity(recovery_severity, severity)
         blocks = plan.metadata.get("blocks", 0)
         if isinstance(blocks, int):
             total_blocks += blocks
 
     combined_metadata = dict(metadata or {})
+    if recovery_actions or "recovery_actions" not in combined_metadata:
+        combined_metadata["recovery_actions"] = recovery_actions
+    if recovery_severity != "none" or "recovery_severity" not in combined_metadata:
+        combined_metadata["recovery_severity"] = recovery_severity
+    if recovery_severity == "high" or combined_metadata.get("requires_explicit_confirmation") is True:
+        combined_metadata["requires_explicit_confirmation"] = True
+    elif "requires_explicit_confirmation" not in combined_metadata:
+        combined_metadata["requires_explicit_confirmation"] = False
     combined_metadata["contents"] = contents
     combined_metadata["blocks"] = total_blocks
     combined_diff = "\n\n".join(diff_parts)
@@ -428,8 +467,30 @@ def inspect_full_file(
     target = resolve_workspace_target(workspace, target_relative, allow_missing=True)
     clean = strip_outer_fence(content) if strip_fence else content
     new_bytes = clean.encode("utf-8")
+    warnings: list[str] = []
+    recovery_actions: list[dict[str, str]] = []
+    recovery_severity = "none"
     if target.suffix.lower() == ".py":
-        compile(clean, target_relative, "exec")
+        try:
+            compile(clean, target_relative, "exec")
+        except SyntaxError as exc:
+            detail = (
+                f"{target_relative}: sintassi Python non valida "
+                f"({exc.msg}, riga {exc.lineno})."
+            )
+            warnings.append(
+                detail
+                + " Il diff resta disponibile, ma l'applicazione richiede conferma esplicita."
+            )
+            recovery_actions.append(
+                _recovery_action(
+                    "python_syntax_error",
+                    "high",
+                    target=target_relative,
+                    detail=detail,
+                )
+            )
+            recovery_severity = _stronger_severity(recovery_severity, "high")
     if target.exists():
         old_bytes = target.read_bytes()
         try:
@@ -448,5 +509,11 @@ def inspect_full_file(
         plan_type="full_file", workspace=workspace.resolve(), source_path=None,
         changes=[FileChange(relative, relative, kind, old_hash, sha256_bytes(new_bytes), size=len(new_bytes))],
         diff=diff,
-        metadata={"contents": {relative: new_bytes}},
+        warnings=warnings,
+        metadata={
+            "contents": {relative: new_bytes},
+            "recovery_actions": recovery_actions,
+            "recovery_severity": recovery_severity,
+            "requires_explicit_confirmation": recovery_severity == "high",
+        },
     )

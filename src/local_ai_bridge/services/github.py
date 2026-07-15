@@ -11,9 +11,11 @@ from local_ai_bridge.services.git import (
     GitIntegrationError,
     _run_command,
     git_available,
+    git_author_identity,
     git_has_commits,
     git_init,
     git_remote_url,
+    ensure_git_author_identity,
     generate_commit_message,
     create_commit,
     push_current_branch,
@@ -134,6 +136,45 @@ def github_setup_git() -> str:
         ["gh", "auth", "setup-git", "--hostname", _GITHUB_HOST],
         timeout=30,
     )
+
+
+def _github_commit_identity() -> tuple[str, str]:
+    """Return a privacy-preserving commit identity for the active GitHub account."""
+    if not github_cli_available():
+        raise GitIntegrationError("GitHub CLI (gh) non è installata.")
+    raw = _run_command(
+        ["gh", "api", "user", "--hostname", _GITHUB_HOST],
+        timeout=30,
+    )
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise GitIntegrationError("GitHub CLI ha restituito un profilo utente non valido.") from exc
+    if not isinstance(data, dict):
+        raise GitIntegrationError("GitHub CLI ha restituito un profilo utente non valido.")
+    login = str(data.get("login") or "").strip()
+    if not _ACCOUNT_NAME.fullmatch(login):
+        raise GitIntegrationError("Impossibile determinare l'account GitHub attivo.")
+    display_name = str(data.get("name") or "").strip() or login
+    raw_identifier = data.get("id")
+    try:
+        identifier = int(raw_identifier)
+    except (TypeError, ValueError):
+        identifier = 0
+    if identifier > 0:
+        email = f"{identifier}+{login}@users.noreply.github.com"
+    else:
+        email = f"{login}@users.noreply.github.com"
+    return display_name, email
+
+
+def ensure_github_commit_identity(workspace: Path) -> str:
+    """Configure only missing Git author fields from the active GitHub account."""
+    name, email = git_author_identity(workspace)
+    if name is not None and email is not None:
+        return ""
+    github_name, github_email = _github_commit_identity()
+    return ensure_git_author_identity(workspace, name=github_name, email=github_email)
 
 
 def _validate_repository_part(value: str, label: str) -> str:
@@ -365,7 +406,9 @@ def publish_or_update_github(
     changes = _current_changes(workspace)
     commit_created = False
     commit_message = None
+    identity_output = ""
     if changes:
+        identity_output = ensure_github_commit_identity(workspace)
         commit_message = generate_commit_message(workspace, session_manager)
         create_commit(workspace, commit_message)
         commit_created = True
@@ -387,8 +430,13 @@ def publish_or_update_github(
         remote = git_remote_url(workspace, "origin")
         created_repository = True
 
+    credential_output = github_setup_git()
     push_output = push_current_branch(workspace)
-    output_parts = [part for part in (protection.summary, push_output) if part]
+    output_parts = [
+        part
+        for part in (protection.summary, identity_output, credential_output, push_output)
+        if part
+    ]
     return {
         "message": "Progetto pubblicato su GitHub." if created_repository else "GitHub aggiornato correttamente.",
         "repository_created": created_repository,

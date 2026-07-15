@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 from local_ai_bridge.i18n import tr as _
+from local_ai_bridge.core.superpowers import list_superpowers
 from local_ai_bridge.services.operational_execution import OperationalExecutionRecord
 from local_ai_bridge.services.operational_missions import (
     CATEGORY_CUSTOM,
@@ -9,6 +12,7 @@ from local_ai_bridge.services.operational_missions import (
     CATEGORY_IMAGES,
     CATEGORY_PRESENTATIONS,
     CATEGORY_SPREADSHEETS,
+    CATEGORY_TRANSLATION,
     CATEGORY_WRITING,
     MISSION_ARCHIVED,
     MISSION_CANCELLED,
@@ -48,6 +52,7 @@ _CATEGORY_LABELS = {
     CATEGORY_IMAGES: "Immagini e grafica",
     CATEGORY_WRITING: "Scrittura e relazioni",
     CATEGORY_FILE_ORGANIZATION: "Organizzazione di file",
+    CATEGORY_TRANSLATION: "Traduzione",
     CATEGORY_CUSTOM: "Richiesta personalizzata",
 }
 _PROVIDER_LABELS = {
@@ -65,8 +70,18 @@ def procedure_label(procedure_id: str) -> str:
     return _(_PROCEDURE_LABELS.get(procedure_id, procedure_id))
 
 
-def category_label(category_id: str) -> str:
-    return _(_CATEGORY_LABELS.get(category_id, category_id))
+def category_label(category_id: str, workspace: str | Path | None = None) -> str:
+    legacy = _CATEGORY_LABELS.get(category_id)
+    if legacy is not None:
+        return _(legacy)
+    if workspace:
+        match = next(
+            (item for item in list_superpowers(Path(workspace)) if item.superpower_id == category_id),
+            None,
+        )
+        if match is not None:
+            return match.title
+    return category_id
 
 
 def provider_label(provider_id: str) -> str:
@@ -174,8 +189,12 @@ def mission_details(
     if mission.procedure_id == PROCEDURE_WEB_MISSION:
         heading = (
             f"{_('Titolo:')} {mission.title}\n"
-            f"{_('Tipo di lavoro:')} {category_label(mission.work_category)}\n"
-            f"{_('AI Web:')} {provider_label(mission.provider)}\n"
+            f"{_('Settore di lavoro:')} {category_label(mission.work_category)}\n"
+            + (
+                f"{_('Approccio operativo:')} {category_label(mission.superpower_id, mission.workspace)}\n"
+                if mission.superpower_id else ""
+            )
+            + f"{_('AI Web:')} {provider_label(mission.provider)}\n"
         )
     else:
         heading = (

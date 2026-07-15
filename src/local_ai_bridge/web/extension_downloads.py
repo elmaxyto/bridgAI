@@ -7,7 +7,8 @@ from typing import Any
 from local_ai_bridge.core.settings import AppSettings, SettingsStore
 
 
-_DOWNLOAD_DIRECTORY_PROBE_PREFIX = ".bridgai-download-directory-"
+_DOWNLOAD_DIRECTORY_PROBE_PREFIX = "bridgai-download-directory-"
+_DOWNLOAD_DIRECTORY_LEGACY_PROBE_PREFIX = ".bridgai-download-directory-"
 _DOWNLOAD_DIRECTORY_PROBE_SUFFIX = ".tmp"
 _DOWNLOAD_DIRECTORY_PROBE_CONTENT = b"BridgAI download directory probe\n"
 _DOWNLOAD_DIRECTORY_PROBE_MAX_AGE = 120.0
@@ -31,10 +32,11 @@ def _download_directory_probe(raw_path: object) -> Path:
     probe = supplied.resolve(strict=True)
     if not probe.is_file():
         raise ValueError("Il file di verifica della cartella Download non è valido.")
-    if not (
+    valid_probe_name = (
         probe.name.startswith(_DOWNLOAD_DIRECTORY_PROBE_PREFIX)
-        and probe.name.endswith(_DOWNLOAD_DIRECTORY_PROBE_SUFFIX)
-    ):
+        or probe.name.startswith(_DOWNLOAD_DIRECTORY_LEGACY_PROBE_PREFIX)
+    ) and probe.name.endswith(_DOWNLOAD_DIRECTORY_PROBE_SUFFIX)
+    if not valid_probe_name:
         raise ValueError("Il file di verifica della cartella Download non è riconosciuto.")
     stat = probe.stat()
     if stat.st_size > 128 or time.time() - stat.st_mtime > _DOWNLOAD_DIRECTORY_PROBE_MAX_AGE:

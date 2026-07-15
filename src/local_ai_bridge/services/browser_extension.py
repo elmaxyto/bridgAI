@@ -18,6 +18,63 @@ STALE_LOCK_SECONDS = 30.0
 CONNECTED_WINDOW_SECONDS = 75.0
 REQUEST_DEVELOPMENT = "development"
 REQUEST_OPERATIONAL = "operational"
+SUPPORTED_WEB_AI_PROVIDERS = ("chatgpt", "claude", "gemini")
+_PROVIDER_LABELS = {
+    "chatgpt": "ChatGPT",
+    "claude": "Claude",
+    "gemini": "Gemini",
+}
+_PROVIDER_URLS = {
+    "chatgpt": "https://chatgpt.com/",
+    "claude": "https://claude.ai/new",
+    "gemini": "https://gemini.google.com/app",
+}
+
+
+def normalize_web_ai_provider(value: object) -> str:
+    """Return the provider supported by the browser extension.
+
+    ``custom`` and an empty legacy value keep the historical ChatGPT behavior.
+    Other unknown identifiers are rejected instead of opening an unexpected site.
+    """
+    provider = str(value or "").strip().lower()
+    if provider in {"", "custom"}:
+        return "chatgpt"
+    if provider not in SUPPORTED_WEB_AI_PROVIDERS:
+        raise ValueError(
+            f"Provider AI Web non supportato dall’estensione: {provider}."
+        )
+    return provider
+
+
+def web_ai_provider_label(value: object) -> str:
+    """Return the display label for a normalized browser provider."""
+    return _PROVIDER_LABELS[normalize_web_ai_provider(value)]
+
+
+def web_ai_provider_url(value: object) -> str:
+    """Return the canonical web URL used to wake a supported provider tab."""
+    return _PROVIDER_URLS[normalize_web_ai_provider(value)]
+
+
+def normalize_extension_providers(value: object) -> tuple[str, ...]:
+    """Return the providers explicitly advertised by a browser extension.
+
+    Extensions predating provider negotiation are treated as ChatGPT-only so a
+    stale service worker cannot silently receive Claude or Gemini requests.
+    """
+    if isinstance(value, str):
+        raw_values = value.split(",")
+    elif isinstance(value, (list, tuple, set, frozenset)):
+        raw_values = value
+    else:
+        raw_values = ()
+    normalized: list[str] = []
+    for item in raw_values:
+        provider = str(item or "").strip().lower()
+        if provider in SUPPORTED_WEB_AI_PROVIDERS and provider not in normalized:
+            normalized.append(provider)
+    return tuple(normalized or ("chatgpt",))
 
 
 def browser_extension_directory() -> Path:
@@ -40,6 +97,7 @@ def _default_state() -> dict[str, Any]:
         "version": STATE_VERSION,
         "extension_last_seen_at": 0.0,
         "extension_version": "",
+        "extension_providers": ["chatgpt"],
         "request": None,
     }
 
@@ -83,6 +141,9 @@ def _read_unlocked() -> dict[str, Any]:
     state.update(value)
     if not isinstance(state.get("request"), (dict, type(None))):
         state["request"] = None
+    state["extension_providers"] = list(
+        normalize_extension_providers(state.get("extension_providers"))
+    )
     return state
 
 
@@ -186,7 +247,7 @@ def _queue(
         "request_kind": request_kind,
         "mission_id": mission_id,
         "workspace": str(resolved),
-        "provider": provider.strip().lower() or "chatgpt",
+        "provider": normalize_web_ai_provider(provider),
         "prompt": text,
         "status": "queued",
         "message": (
@@ -198,6 +259,7 @@ def _queue(
         "updated_at": now,
         "claimed_at": 0.0,
         "response_text": "",
+        "response_received_at": 0.0,
         "context_zip_path": str(context_zip) if context_zip else "",
         "context_filename": context_zip.name if context_zip else "",
         "requested_files": [],
@@ -225,11 +287,23 @@ def _request_for_id(state: dict[str, Any], request_id: str) -> dict[str, Any]:
     return request
 
 
-def claim_request() -> dict[str, Any] | None:
+def claim_request(supported_providers: object | None = None) -> dict[str, Any] | None:
+    supported = (
+        None
+        if supported_providers is None
+        else set(normalize_extension_providers(supported_providers))
+    )
+
     def claim(state: dict[str, Any]) -> dict[str, Any] | None:
         request = state.get("request")
         if not isinstance(request, dict) or request.get("status") != "queued":
             return None
+        provider = normalize_web_ai_provider(request.get("provider"))
+        if supported is not None and provider not in supported:
+            raise ValueError(
+                f"L’estensione Chrome collegata non supporta {web_ai_provider_label(provider)}. "
+                "Ricarica l’estensione dalla pagina chrome://extensions e riprova."
+            )
         now = time.time()
         request["status"] = "sent"
         request["message"] = (
@@ -272,10 +346,12 @@ def record_response(request_id: str, text: str) -> dict[str, Any]:
 
     def update(state: dict[str, Any]) -> dict[str, Any]:
         request = _request_for_id(state, request_id)
+        now = time.time()
         request["response_text"] = response
+        request["response_received_at"] = now
         request["status"] = "response_received"
         request["message"] = "Risposta dell’AI ricevuta."
-        request["updated_at"] = time.time()
+        request["updated_at"] = now
         request["error"] = ""
         return dict(request)
 
@@ -319,6 +395,32 @@ def mark_waiting_result(request_id: str) -> dict[str, Any]:
         request["status"] = "waiting_result"
         request["message"] = "In attesa dello ZIP dei risultati dell’AI."
         request["updated_at"] = time.time()
+        return dict(request)
+
+    return _mutate(update)
+
+
+def mark_text_update_ready(
+    request_id: str,
+    pre_apply: dict[str, Any] | None = None,
+    *,
+    plan_id: str,
+) -> dict[str, Any]:
+    clean_plan_id = plan_id.strip()
+    if not clean_plan_id:
+        raise ValueError("Il piano dell’aggiornamento testuale è mancante.")
+
+    def update(state: dict[str, Any]) -> dict[str, Any]:
+        request = _request_for_id(state, request_id)
+        request["update_zip_path"] = ""
+        request["plan_id"] = clean_plan_id
+        request["pre_apply"] = dict(pre_apply or {})
+        request["status"] = "update_ready"
+        request["message"] = (
+            "Aggiornamento testuale pronto: controlla l’anteprima e applicalo manualmente."
+        )
+        request["updated_at"] = time.time()
+        request["error"] = ""
         return dict(request)
 
     return _mutate(update)
@@ -383,9 +485,15 @@ def mark_error(request_id: str, message: str) -> dict[str, Any]:
     return _mutate(update)
 
 
-def mark_extension_seen(extension_version: str = "") -> None:
+def mark_extension_seen(
+    extension_version: str = "",
+    supported_providers: object = (),
+) -> None:
+    providers = normalize_extension_providers(supported_providers)
+
     def update(state: dict[str, Any]) -> None:
         state["extension_last_seen_at"] = time.time()
+        state["extension_providers"] = list(providers)
         if extension_version.strip():
             state["extension_version"] = extension_version.strip()
 
@@ -400,5 +508,8 @@ def connection_snapshot() -> dict[str, Any]:
         "connected": bool(last_seen and time.time() - last_seen <= CONNECTED_WINDOW_SECONDS),
         "last_seen_at": last_seen,
         "extension_version": str(state.get("extension_version", "")),
+        "extension_providers": list(
+            normalize_extension_providers(state.get("extension_providers"))
+        ),
         "request": dict(request) if isinstance(request, dict) else None,
     }

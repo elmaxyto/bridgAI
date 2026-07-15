@@ -34,6 +34,10 @@ def is_web_server_ready(port: int, timeout: float = 0.35) -> bool:
     request = urllib.request.Request(web_url(port), headers={"Accept": "text/html"})
     try:
         with opener.open(request, timeout=timeout) as response:
+            # Read the whole response before closing the socket. On Windows,
+            # closing immediately after the headers can abort the server write
+            # and produce repeated WinError 10053 tracebacks.
+            response.read()
             return response.status == 200
     except (OSError, urllib.error.URLError, ValueError):
         return False
@@ -69,10 +73,18 @@ def browser_extension_service_status(
     return payload
 
 
-def web_log_path() -> Path:
-    path = app_data_dir() / "logs" / "web_server.log"
-    path.parent.mkdir(parents=True, exist_ok=True)
+def logs_directory() -> Path:
+    path = app_data_dir() / "logs"
+    path.mkdir(parents=True, exist_ok=True)
     return path
+
+
+def desktop_log_path() -> Path:
+    return logs_directory() / "desktop.log"
+
+
+def web_log_path() -> Path:
+    return logs_directory() / "web_server.log"
 
 
 def project_root() -> Path:
@@ -81,7 +93,7 @@ def project_root() -> Path:
 
 def _subprocess_environment(root: Path) -> dict[str, str]:
     environment = os.environ.copy()
-    source_directory = str(root / "src")
+    source_directory = str((root.expanduser().resolve() / "src").resolve())
     existing = environment.get("PYTHONPATH", "")
     environment["PYTHONPATH"] = (
         source_directory
@@ -91,10 +103,33 @@ def _subprocess_environment(root: Path) -> dict[str, str]:
     return environment
 
 
-def _creation_flags() -> int:
-    if sys.platform == "win32":
-        return int(getattr(subprocess, "CREATE_NO_WINDOW", 0))
-    return 0
+def _creation_flags(show_console: bool = False) -> int:
+    if sys.platform != "win32":
+        return 0
+    flag_name = "CREATE_NEW_CONSOLE" if show_console else "CREATE_NO_WINDOW"
+    return int(getattr(subprocess, flag_name, 0))
+
+
+def _python_executable(show_console: bool = False) -> str:
+    executable = Path(sys.executable)
+    if (
+        sys.platform == "win32"
+        and show_console
+        and executable.name.casefold() == "pythonw.exe"
+    ):
+        console_executable = executable.with_name("python.exe")
+        if console_executable.is_file():
+            return str(console_executable)
+    return str(executable)
+
+
+def _web_server_command(root: Path, show_console: bool) -> list[str]:
+    """Build a source-tree-safe command for the web subprocess."""
+    executable = _python_executable(show_console)
+    runner = root / "run.py"
+    if runner.is_file():
+        return [executable, str(runner), "--web-server"]
+    return [executable, "-m", "local_ai_bridge.web"]
 
 
 def _add_authentication_environment(
@@ -128,6 +163,7 @@ def start_web_interface(
     password_hash: str | None = None,
     totp_secret: str | None = None,
     totp_local_bypass: bool = False,
+    show_console: bool = False,
     wait_seconds: float = 5.0,
     popen: Callable[..., subprocess.Popen[bytes]] = subprocess.Popen,
 ) -> WebLaunchResult:
@@ -142,21 +178,16 @@ def start_web_interface(
             webbrowser.open(url)
         return WebLaunchResult(url=url, process=None, already_running=True)
 
-    command = [
-        sys.executable,
-        "-m",
-        "local_ai_bridge.web",
-        "--port",
-        str(port),
-        "--no-browser",
-    ]
+    root = project_root()
+    command = _web_server_command(root, show_console)
+    command.extend(["--port", str(port), "--no-browser"])
     if remote_access:
         command.extend(["--host", "0.0.0.0"])
     if workspace_root is not None and str(workspace_root).strip():
         command.extend(["--workspace-root", str(Path(workspace_root).expanduser())])
-    root = project_root()
     log_path = web_log_path()
-    log_stream = log_path.open("ab")
+    visible_console = sys.platform == "win32" and show_console
+    log_stream = None if visible_console else log_path.open("ab")
     environment = _subprocess_environment(root)
     _add_authentication_environment(
         environment,
@@ -168,15 +199,16 @@ def start_web_interface(
     try:
         process = popen(
             command,
-            stdin=subprocess.DEVNULL,
-            stdout=log_stream,
-            stderr=subprocess.STDOUT,
-            creationflags=_creation_flags(),
+            stdin=None if visible_console else subprocess.DEVNULL,
+            stdout=None if visible_console else log_stream,
+            stderr=None if visible_console else subprocess.STDOUT,
+            creationflags=_creation_flags(show_console),
             cwd=str(root),
             env=environment,
         )
     finally:
-        log_stream.close()
+        if log_stream is not None:
+            log_stream.close()
 
     deadline = time.monotonic() + max(0.0, wait_seconds)
     while time.monotonic() < deadline:
@@ -193,6 +225,56 @@ def start_web_interface(
     except OSError:
         pass
     raise RuntimeError(f"Il server web locale non ha risposto su {url}. Dettagli: {log_path}")
+
+
+
+def start_windows_direct_web_server(
+    port: int = 8765,
+    *,
+    show_console: bool = False,
+    wait_seconds: float = 8.0,
+    popen: Callable[..., subprocess.Popen[bytes]] = subprocess.Popen,
+) -> WebLaunchResult:
+    """Launch the repository Windows batch script and wait until the server responds."""
+    url = web_url(port)
+    if is_web_server_ready(port):
+        return WebLaunchResult(url=url, process=None, already_running=True)
+    if sys.platform != "win32":
+        raise RuntimeError("L’avvio diretto tramite script è disponibile solo su Windows.")
+    if int(port) != 8765:
+        raise RuntimeError("Lo script di avvio diretto supporta la porta 8765.")
+
+    script = project_root() / "web_server_force_win.bat"
+    if not script.is_file():
+        raise RuntimeError(f"Script server Web non trovato: {script}")
+    visible_console = bool(show_console)
+    log_path = web_log_path()
+    log_stream = None if visible_console else log_path.open("ab")
+    try:
+        process = popen(
+            ["cmd.exe", "/c", str(script)],
+            cwd=str(project_root()),
+            stdin=None if visible_console else subprocess.DEVNULL,
+            stdout=None if visible_console else log_stream,
+            stderr=None if visible_console else subprocess.STDOUT,
+            creationflags=_creation_flags(show_console),
+            env=_subprocess_environment(project_root()),
+        )
+    finally:
+        if log_stream is not None:
+            log_stream.close()
+    deadline = time.monotonic() + max(0.0, wait_seconds)
+    while time.monotonic() < deadline:
+        if process.poll() is not None:
+            raise RuntimeError("Il server Web diretto si è chiuso durante l’avvio.")
+        if is_web_server_ready(port):
+            return WebLaunchResult(url=url, process=process, already_running=False)
+        time.sleep(0.1)
+    try:
+        process.terminate()
+    except OSError:
+        pass
+    raise RuntimeError(f"Il server Web diretto non ha risposto su {url}.")
 
 
 def stop_web_interface(process: subprocess.Popen[bytes] | None, timeout: float = 2.0) -> None:

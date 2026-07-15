@@ -14,6 +14,7 @@ from local_ai_bridge.services import git_clone as git_clone_service
 from local_ai_bridge.web.security import WebSecurityConfig, WorkspacePolicy, validate_project_name
 from local_ai_bridge.web.server import BridgeHTTPServer
 from local_ai_bridge.web.state import BridgeState
+from local_ai_bridge.web.project_actions import dispatch_project_action
 
 
 def _post(base: str, path: str, payload: dict, *, token: str, csrf: str):
@@ -261,3 +262,106 @@ def test_workspace_root_endpoint_is_never_remotely_configurable(tmp_path: Path, 
         server.shutdown()
         server.server_close()
         thread.join(timeout=5)
+
+
+def test_project_notes_endpoints_share_project_storage(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+    token = "n" * 32
+    root = tmp_path / "projects"
+    project = root / "notes-project"
+    project.mkdir(parents=True)
+    security = WebSecurityConfig.build(host="0.0.0.0", auth_token=token, workspace_root=root)
+    state = BridgeState(security=security)
+    state.set_workspace("notes-project")
+    server = BridgeHTTPServer(("127.0.0.1", 0), state)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base = f"http://127.0.0.1:{server.server_address[1]}"
+    try:
+        status, payload = _post(
+            base,
+            "/api/project-notes/save",
+            {"title": "Todo Web", "content": "Verificare mobile", "todo": True, "completed": False},
+            token=token,
+            csrf=state.csrf_token,
+        )
+        assert status == 200
+        assert payload["items"][0]["title"] == "Todo Web"
+        note_id = payload["items"][0]["id"]
+
+        status, payload = _post(
+            base, "/api/project-notes/list", {}, token=token, csrf=state.csrf_token
+        )
+        assert status == 200
+        assert payload["items"][0]["todo"] is True
+
+        status, payload = _post(
+            base, "/api/project-notes/delete", {"id": note_id}, token=token, csrf=state.csrf_token
+        )
+        assert status == 200
+        assert payload["items"] == []
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+def test_global_superpower_endpoints_do_not_require_workspace(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+    state = BridgeState(security=WebSecurityConfig.build())
+
+    listed = dispatch_project_action(state, "/api/superpowers/list", {})
+    assert listed is not None
+    assert listed["items"]
+
+    saved = dispatch_project_action(
+        state,
+        "/api/superpowers/save",
+        {
+            "id": "web-test",
+            "title": "Web test",
+            "description": "Created without a workspace",
+            "category": "Test",
+            "markdown": "Follow the test instructions.",
+        },
+    )
+    assert any(item["id"] == "web-test" for item in saved["items"])
+
+    deleted = dispatch_project_action(
+        state, "/api/superpowers/delete", {"id": "web-test"}
+    )
+    assert all(item["id"] != "web-test" for item in deleted["items"])
+
+
+def test_batch_project_report_endpoint_creates_download_artifact(tmp_path: Path, monkeypatch) -> None:
+    from local_ai_bridge.web import project_actions
+
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+    root = tmp_path / "projects"
+    first = root / "first"
+    second = root / "second"
+    first.mkdir(parents=True)
+    second.mkdir()
+    state = BridgeState(security=WebSecurityConfig.build(workspace_root=root))
+
+    def fake_report(project: Path, task: str = "", settings=None) -> str:
+        return f"# {project.name}\n"
+
+    monkeypatch.setattr(project_actions, "build_super_report", fake_report, raising=False)
+    # project_actions calls create_batch_project_reports_zip imported from reporting;
+    # patch the reporting module function through the project_actions global when available.
+    from local_ai_bridge.services import reporting
+
+    monkeypatch.setattr(reporting, "build_super_report", fake_report)
+
+    payload = dispatch_project_action(
+        state,
+        "/api/projects/batch-report",
+        {"confirm": "BATCH_REPORT"},
+    )
+
+    assert payload is not None
+    assert payload["count"] == 2
+    assert payload["filename"].startswith("bridgai-project-reports-")
+    assert (root / payload["filename"]).is_file()
+    assert state.get_artifact(payload["artifact_id"]).path == (root / payload["filename"]).resolve()

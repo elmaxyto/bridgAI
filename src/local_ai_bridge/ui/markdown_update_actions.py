@@ -4,9 +4,8 @@ from pathlib import Path
 from PySide6.QtWidgets import QApplication, QFileDialog, QMessageBox
 
 from local_ai_bridge.i18n import tr as _
-from local_ai_bridge.services.markdown_exchange import parse_markdown_response
 from local_ai_bridge.services.temp_storage import latest_markdown_file, managed_subdir
-from local_ai_bridge.services.text_file_operations import inspect_text_file_operations
+from local_ai_bridge.services.text_update_import import inspect_text_update_response
 
 
 class MarkdownUpdateActionsMixin:
@@ -39,7 +38,7 @@ class MarkdownUpdateActionsMixin:
         self.markdown_result_edit.setFocus()
         self._show_status(_('Risposta Markdown incollata dagli appunti.'))
 
-    def _inspect_markdown_response_text(self, text: str) -> bool:
+    def _inspect_markdown_response_text(self, text: str, source_path: Path | None = None) -> bool:
         workspace = self._require_workspace()
         if not workspace:
             return False
@@ -51,7 +50,9 @@ class MarkdownUpdateActionsMixin:
             )
             return False
         try:
-            plan = parse_markdown_response(workspace, text)
+            plan = inspect_text_update_response(workspace, text, preferred='markdown_exchange')
+            if source_path is not None:
+                plan.source_path = source_path
             snapshot = managed_subdir(self.settings.temp_directory, 'patches') / 'latest_markdown_response.md'
             snapshot.write_text(text, encoding='utf-8')
             self.display_plan(plan)
@@ -76,7 +77,7 @@ class MarkdownUpdateActionsMixin:
             QMessageBox.critical(self, _('Lettura Markdown fallita'), str(exc))
             return
         self.markdown_result_edit.setPlainText(text)
-        if self._inspect_markdown_response_text(text):
+        if self._inspect_markdown_response_text(text, source):
             self._show_status(
                 _('Markdown caricato da {path}. Controlla l’anteprima prima di applicare.').format(path=source)
             )
@@ -157,7 +158,7 @@ class MarkdownUpdateActionsMixin:
             QMessageBox.critical(self, _('Lettura file di aggiornamento fallita'), str(exc))
             return
         self.text_result_edit.setPlainText(text)
-        self._inspect_text_update_text(text)
+        self._inspect_text_update_text(text, Path(raw_path).expanduser())
 
     def paste_text_result_from_clipboard(self) -> None:
         text = QApplication.clipboard().text()
@@ -165,7 +166,7 @@ class MarkdownUpdateActionsMixin:
         self.text_result_edit.setFocus()
         self._show_status(_('Risposta Markdown incollata dagli appunti.'))
 
-    def _inspect_text_update_text(self, text: str) -> bool:
+    def _inspect_text_update_text(self, text: str, source_path: Path | None = None) -> bool:
         workspace = self._require_workspace()
         if not workspace:
             return False
@@ -182,7 +183,9 @@ class MarkdownUpdateActionsMixin:
                 / 'latest_text_file_operations.md'
             )
             snapshot.write_text(text, encoding='utf-8')
-            plan = inspect_text_file_operations(workspace, text)
+            plan = inspect_text_update_response(workspace, text, preferred='text_file_operations')
+            if source_path is not None:
+                plan.source_path = source_path
             self.display_plan(plan)
             summary = plan.metadata.get('import_summary', {})
             self._show_status(

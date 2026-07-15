@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import sys
+
 from local_ai_bridge.i18n import tr as _
 from local_ai_bridge.ui.tabs.ai_assistant import build_ai_assistant_settings_group
 from local_ai_bridge.ui.widgets import ToggleSwitch, _button
@@ -11,6 +13,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QPlainTextEdit,
     QScrollArea,
     QToolButton,
     QVBoxLayout,
@@ -60,21 +63,21 @@ def build_settings_tab(window) -> QWidget:
     interface_group = QGroupBox(_('Interfaccia'))
     interface_layout = QVBoxLayout(interface_group)
 
-    primary_mode_section, primary_mode_layout = _section('Modalità principale')
-    primary_mode_layout.addWidget(
+    mode_section, mode_layout = _section('Modalità principale')
+    mode_layout.addWidget(
         _wrapped_label(
-            'Scegli l’esperienza mostrata normalmente all’avvio. La scelta non cambia il tipo '
-            'di workspace e può essere modificata in qualsiasi momento.'
+            'Scegli tra il flusso per lo sviluppo software e l’assistente guidato per '
+            'documenti, presentazioni, PDF, immagini e altri lavori con l’AI.'
         )
     )
-    primary_mode_form = QFormLayout()
+    mode_form = QFormLayout()
     window.primary_mode_combo = QComboBox()
-    window.primary_mode_combo.addItem(_('Modalità Sviluppo'), 'development')
-    window.primary_mode_combo.addItem(_('Modalità Operativa'), 'operations')
+    window.primary_mode_combo.addItem(_('Sviluppo software'), 'development')
+    window.primary_mode_combo.addItem(_('Assistente Attività AI'), 'operations')
     window.primary_mode_combo.currentIndexChanged.connect(window.save_primary_mode)
-    primary_mode_form.addRow(_('Modalità:'), window.primary_mode_combo)
-    primary_mode_layout.addLayout(primary_mode_form)
-    interface_layout.addWidget(primary_mode_section)
+    mode_form.addRow(_('Modalità:'), window.primary_mode_combo)
+    mode_layout.addLayout(mode_form)
+    interface_layout.addWidget(mode_section)
 
     window.simple_mode_check = ToggleSwitch(_('Modalità super semplice'))
     window.simple_mode_check.setToolTip(
@@ -96,6 +99,7 @@ def build_settings_tab(window) -> QWidget:
     window.preferred_web_ai_combo.addItem('ChatGPT', 'chatgpt')
     window.preferred_web_ai_combo.addItem('Claude', 'claude')
     window.preferred_web_ai_combo.addItem('Gemini', 'gemini')
+    window.preferred_web_ai_combo.addItem('DeepSeek', 'deepseek')
     window.preferred_web_ai_combo.addItem(_('Personalizzato'), 'custom')
     window.preferred_web_ai_combo.currentIndexChanged.connect(
         lambda index: window.set_preferred_web_ai(
@@ -105,8 +109,8 @@ def build_settings_tab(window) -> QWidget:
     preferred_ai_form.addRow(_('Seleziona modello preferito:'), window.preferred_web_ai_combo)
     preferred_ai_layout.addLayout(preferred_ai_form)
     window.preferred_web_ai_flow_label = _wrapped_label(
-        'ChatGPT e Claude usano ZIP → ZIP; Gemini usa ZIP → File Markdown di aggiornamento. '
-        'Con Personalizzato scegli il flusso.'
+        'ChatGPT e Claude usano ZIP → ZIP; Gemini usa ZIP → File Markdown di aggiornamento; '
+        'DeepSeek usa Markdown → File Markdown di aggiornamento. Con Personalizzato scegli il flusso.'
     )
     preferred_ai_layout.addWidget(window.preferred_web_ai_flow_label)
     wizard_row = QHBoxLayout()
@@ -120,6 +124,15 @@ def build_settings_tab(window) -> QWidget:
     wizard_row.addWidget(window.reopen_initial_setup_button)
     wizard_row.addStretch(1)
     preferred_ai_layout.addLayout(wizard_row)
+    window.simple_force_web_server_button = _button(
+        _('Avvia server web forzato (Windows)'),
+        window.start_windows_direct_web_server_from_settings,
+    )
+    window.simple_force_web_server_button.setToolTip(
+        _('Avvia web_server_force_win.bat in una console separata sulla porta 8765.')
+    )
+    window.simple_force_web_server_button.setVisible(sys.platform == 'win32')
+    preferred_ai_layout.addWidget(window.simple_force_web_server_button)
     preferred_ai_section.setVisible(window.settings.simple_mode)
     window.simple_mode_check.toggled.connect(preferred_ai_section.setVisible)
     interface_layout.addWidget(preferred_ai_section)
@@ -171,6 +184,36 @@ def build_settings_tab(window) -> QWidget:
     updates_row.addWidget(_button(_('Cambia cartella'), window.choose_update_zip_directory))
     updates_layout.addLayout(updates_row)
     folders_layout.addWidget(updates_section)
+
+    external_context_section, external_context_layout = _section('Contesti aggiuntivi per il Super-Report')
+    external_context_layout.addWidget(
+        _wrapped_label(
+            'Aggiungi una cartella per riga per mostrare al progetto corrente altri progetti o '
+            'librerie locali. Questi percorsi vengono inclusi nel Super-Report solo come riferimento '
+            'di lettura: le modifiche applicabili restano nel workspace corrente.'
+        )
+    )
+    window.external_context_paths_edit = QPlainTextEdit()
+    window.external_context_paths_edit.setObjectName('externalContextPathsEdit')
+    window.external_context_paths_edit.setPlaceholderText(
+        _('es. /home/max/progetti/altro-progetto')
+    )
+    window.external_context_paths_edit.setMinimumHeight(86)
+    external_context_layout.addWidget(window.external_context_paths_edit)
+    external_context_row = QHBoxLayout()
+    external_context_row.addWidget(
+        _button(_('Aggiungi cartella'), window.add_external_context_directory)
+    )
+    external_context_row.addWidget(
+        _button(_('Salva contesti'), window.save_external_context_paths)
+    )
+    external_context_row.addWidget(
+        _button(_('Svuota'), window.clear_external_context_paths)
+    )
+    external_context_row.addStretch(1)
+    external_context_layout.addLayout(external_context_row)
+    folders_layout.addWidget(external_context_section)
+    window.external_context_settings_section = external_context_section
 
     temp_section, temp_layout = _section('Cartella file temporanei')
     temp_layout.addWidget(
@@ -226,6 +269,33 @@ def build_settings_tab(window) -> QWidget:
     web_row.addWidget(_button(_('Ferma'), window.stop_web_interface_from_settings))
     web_row.addStretch(1)
     web_layout.addLayout(web_row)
+
+    diagnostics_section, diagnostics_layout = _section('Console e log di diagnostica')
+    diagnostics_layout.addWidget(
+        _wrapped_label(
+            'Su Windows BridgAI e il server web vengono avviati senza finestre terminale. '
+            'Puoi riattivarle per il prossimo avvio oppure aprire i log in qualsiasi momento.'
+        )
+    )
+    window.windows_show_diagnostic_consoles_check = ToggleSwitch(
+        _('Mostra le console di diagnostica su Windows')
+    )
+    window.windows_show_diagnostic_consoles_check.setToolTip(
+        _('La modifica si applica al prossimo avvio di BridgAI e ai successivi avvii del server web.')
+    )
+    window.windows_show_diagnostic_consoles_check.setVisible(sys.platform == 'win32')
+    window.windows_show_diagnostic_consoles_check.toggled.connect(
+        window.set_windows_diagnostic_consoles
+    )
+    diagnostics_layout.addWidget(window.windows_show_diagnostic_consoles_check)
+    diagnostic_buttons = QHBoxLayout()
+    diagnostic_buttons.addWidget(_button(_('Apri log applicazione'), window.open_desktop_log))
+    diagnostic_buttons.addWidget(_button(_('Apri log server web'), window.open_web_server_log))
+    diagnostic_buttons.addWidget(_button(_('Apri cartella log'), window.open_logs_directory))
+    diagnostic_buttons.addStretch(1)
+    diagnostics_layout.addLayout(diagnostic_buttons)
+    web_layout.addWidget(diagnostics_section)
+
     window.web_remote_access_check = ToggleSwitch(
         _('Consenti accesso dalla rete (ascolta su tutte le interfacce)')
     )
@@ -303,6 +373,9 @@ def build_settings_tab(window) -> QWidget:
     )
     projects_root_row.addWidget(_button(_('Rimuovi'), window.clear_web_workspace_root))
     projects_layout.addLayout(projects_root_row)
+    projects_layout.addWidget(
+        _button(_('Genera report batch progetti'), window.create_web_workspace_batch_reports)
+    )
     web_group_layout.addWidget(projects_section)
 
     layout.addWidget(web_group)
@@ -400,6 +473,7 @@ def build_settings_tab(window) -> QWidget:
             '<tr><td><b>ChatGPT</b></td><td>ZIP o Markdown</td><td>ZIP o Markdown</td></tr>'
             '<tr><td><b>Claude</b></td><td>ZIP o Markdown</td><td>ZIP o Markdown</td></tr>'
             '<tr><td><b>Gemini Pro</b></td><td>ZIP o Markdown</td><td>Markdown</td></tr>'
+            '<tr><td><b>DeepSeek</b></td><td>Markdown</td><td>Markdown</td></tr>'
             '<tr><td><b>Perplexity</b></td><td>Markdown consigliato</td><td>Markdown</td></tr>'
             '<tr><td><b>Microsoft Copilot</b></td><td>Markdown</td><td>Markdown</td></tr>'
             '</table>'
@@ -469,6 +543,7 @@ def build_settings_tab(window) -> QWidget:
     window.refresh_prompt_settings()
     window.refresh_web_settings()
     window.refresh_temp_settings()
+    window.refresh_external_context_settings()
     window.refresh_ai_assistant_settings()
     window.refresh_gemini_drive_settings()
     window.refresh_preferred_web_ai_settings()

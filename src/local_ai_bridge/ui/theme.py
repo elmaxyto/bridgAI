@@ -7,7 +7,7 @@ def application_style(dark: bool = False) -> str:
             "window": "#111827", "surface": "#1f2937", "surface_alt": "#263244",
             "text": "#f3f4f6", "muted": "#aeb8c7", "border": "#3b4759",
             "primary": "#60a5fa", "primary_hover": "#3b82f6", "primary_soft": "#1e3a5f",
-            "success": "#34d399", "success_hover": "#10b981", "disabled": "#303b4b",
+            "success": "#34d399", "success_hover": "#10b981", "danger": "#ef4444", "danger_hover": "#dc2626", "disabled": "#303b4b",
             "disabled_text": "#7f8a9b", "selection": "#315f96", "banner": "#172f4d",
             "banner_border": "#315f96", "banner_text": "#dbeafe",
         }
@@ -16,7 +16,7 @@ def application_style(dark: bool = False) -> str:
             "window": "#f4f6f8", "surface": "#ffffff", "surface_alt": "#f8fafc",
             "text": "#1f2937", "muted": "#667085", "border": "#d7dde5",
             "primary": "#2563eb", "primary_hover": "#1d4ed8", "primary_soft": "#e8f0ff",
-            "success": "#059669", "success_hover": "#047857", "disabled": "#f3f4f6",
+            "success": "#059669", "success_hover": "#047857", "danger": "#dc2626", "danger_hover": "#b91c1c", "disabled": "#f3f4f6",
             "disabled_text": "#9ca3af", "selection": "#bfdbfe", "banner": "#eef6ff",
             "banner_border": "#bfdbfe", "banner_text": "#1e3a8a",
         }
@@ -111,6 +111,20 @@ def application_style(dark: bool = False) -> str:
         border-radius: 8px; padding: 8px; selection-background-color: {colors['selection']};
     }}
     QPlainTextEdit:focus, QTextEdit:focus, QLineEdit:focus, QComboBox:focus {{ border: 2px solid {colors['primary']}; }}
+    QComboBox::drop-down {{
+        subcontrol-origin: padding; subcontrol-position: top right;
+        width: 26px; border: 0; background: transparent;
+    }}
+    QComboBox::down-arrow {{
+        width: 0; height: 0; margin-right: 10px;
+        border-left: 4px solid transparent; border-right: 4px solid transparent;
+        border-top: 5px solid {colors['muted']};
+    }}
+    QComboBox QAbstractItemView {{
+        background: {colors['surface']}; color: {colors['text']}; border: 1px solid {colors['border']};
+        border-radius: 8px; outline: 0; selection-background-color: {colors['selection']};
+        selection-color: {colors['text']}; padding: 4px;
+    }}
     QTextEdit#operationsPlanPreview {{
         background: {colors['banner']}; color: {colors['banner_text']};
         border-color: {colors['banner_border']};
@@ -126,13 +140,23 @@ def application_style(dark: bool = False) -> str:
     QPushButton[role="primary"]:hover {{ background: {colors['primary_hover']}; }}
     QPushButton[role="success"] {{ background: {colors['success']}; color: white; border-color: {colors['success']}; }}
     QPushButton[role="success"]:hover {{ background: {colors['success_hover']}; }}
+    QPushButton[role="danger"] {{ background: {colors['danger']}; color: white; border-color: {colors['danger']}; }}
+    QPushButton[role="danger"]:hover {{ background: {colors['danger_hover']}; }}
     QPushButton[role="icon"] {{
         min-width: 38px; max-width: 38px; min-height: 38px; max-height: 38px;
         padding: 0; border-radius: 19px; font-size: 16pt;
         background: {colors['primary_soft']}; color: {colors['primary']}; border-color: transparent;
     }}
     QPushButton[role="icon"]:hover {{ border-color: {colors['primary']}; }}
+    QPushButton[role="chip"] {{
+        min-height: 24px; padding: 3px 12px; border-radius: 13px; font-weight: 600;
+        background: {colors['primary_soft']}; color: {colors['primary']}; border: 1px solid transparent;
+    }}
+    QPushButton[role="chip"]:hover {{ background: {colors['selection']}; }}
     QPushButton:disabled {{ background: {colors['disabled']}; color: {colors['disabled_text']}; border-color: {colors['border']}; }}
+    QListWidget#superpowerLibraryList {{ padding: 4px; }}
+    QListWidget#superpowerLibraryList::item {{ border: 0; margin-bottom: 2px; }}
+    QListWidget#superpowerLibraryList::item:selected {{ background: transparent; }}
     QTreeView, QTableWidget, QListWidget {{ background: {colors['surface']}; color: {colors['text']}; border: 1px solid {colors['border']}; border-radius: 8px; }}
     QTreeView::item:selected, QTableWidget::item:selected, QListWidget::item:selected {{
         background: {colors['selection']}; color: {colors['text']};

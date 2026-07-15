@@ -3,14 +3,16 @@ from __future__ import annotations
 from pathlib import Path
 
 from local_ai_bridge.i18n import tr as _
-from PySide6.QtCore import QUrl
+from PySide6.QtCore import QCoreApplication, QUrl
 from PySide6.QtGui import QDesktopServices
-from PySide6.QtWidgets import QFileDialog, QMessageBox
+from PySide6.QtWidgets import QFileDialog, QMessageBox, QProgressDialog
 from local_ai_bridge.core.settings import (
     DEVELOPMENT_MODE,
+    MAX_EXTERNAL_CONTEXT_PATHS,
     OPERATIONS_MODE,
     PREFERRED_WEB_AI_CUSTOM,
     PRIMARY_MODES,
+    normalize_external_context_paths,
 )
 from local_ai_bridge.core.project_prompts import (
     load_project_ignore,
@@ -19,7 +21,15 @@ from local_ai_bridge.core.project_prompts import (
     save_project_prompt,
 )
 from local_ai_bridge.services.temp_storage import clean_managed_temp, configured_temp_root
-from local_ai_bridge.web.launcher import start_web_interface, stop_web_interface
+from local_ai_bridge.services.reporting import create_batch_project_reports_zip
+from local_ai_bridge.web.launcher import (
+    desktop_log_path,
+    logs_directory,
+    start_web_interface,
+    start_windows_direct_web_server,
+    stop_web_interface,
+    web_log_path,
+)
 from local_ai_bridge.web.security import hash_password
 from local_ai_bridge.ui.totp_dialog import enroll_totp
 from local_ai_bridge.ui.preferred_web_ai_actions import PreferredWebAIActionsMixin
@@ -54,7 +64,7 @@ class SettingsActionsMixin(PreferredWebAIActionsMixin):
             if target_tab is not None and tabs is not None:
                 tabs.setCurrentWidget(target_tab)
             self._show_status(
-                _('Modalità Operativa attivata.')
+                _('Assistente Attività AI attivato.')
                 if mode == OPERATIONS_MODE
                 else _('Modalità Sviluppo attivata.')
             )
@@ -153,6 +163,95 @@ class SettingsActionsMixin(PreferredWebAIActionsMixin):
         self.project_ignore_edit.setPlainText(load_project_ignore(workspace))
         self._show_status(_('File esclusi ricaricato.'))
 
+    def refresh_external_context_settings(self) -> None:
+        editor = getattr(self, 'external_context_paths_edit', None)
+        if editor is None:
+            return
+        editor.setPlainText("\n".join(self.settings.external_context_paths))
+
+    def _external_context_editor_paths(self) -> list[str]:
+        editor = getattr(self, 'external_context_paths_edit', None)
+        if editor is None:
+            return []
+        return normalize_external_context_paths(editor.toPlainText().splitlines())
+
+    def save_external_context_paths(self) -> None:
+        self.settings.external_context_paths = self._external_context_editor_paths()
+        self.settings_store.save(self.settings)
+        self.refresh_external_context_settings()
+        self._show_status(
+            _('Contesti aggiuntivi salvati: {count}').format(
+                count=len(self.settings.external_context_paths)
+            )
+        )
+
+    def clear_external_context_paths(self) -> None:
+        if not self.settings.external_context_paths:
+            editor = getattr(self, 'external_context_paths_edit', None)
+            if editor is not None:
+                editor.clear()
+            return
+        answer = QMessageBox.question(
+            self,
+            _('Svuota contesti aggiuntivi'),
+            _('Rimuovere tutte le cartelle di contesto aggiuntive dal Super-Report?'),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        self.settings.external_context_paths = []
+        self.settings_store.save(self.settings)
+        self.refresh_external_context_settings()
+        self._show_status(_('Contesti aggiuntivi rimossi.'))
+
+    def add_external_context_directory(self) -> None:
+        current_paths = self._external_context_editor_paths()
+        start = current_paths[-1] if current_paths and Path(current_paths[-1]).is_dir() else str(Path.home())
+        selected = QFileDialog.getExistingDirectory(
+            self,
+            _('Scegli cartella di contesto aggiuntiva'),
+            start,
+        )
+        if not selected:
+            return
+        candidate = Path(selected).expanduser()
+        if candidate.is_symlink():
+            QMessageBox.warning(
+                self,
+                _('Cartella contesto non valida'),
+                _('La cartella di contesto aggiuntiva non può essere un link simbolico.'),
+            )
+            return
+        try:
+            resolved = candidate.resolve(strict=True)
+        except OSError as exc:
+            QMessageBox.warning(self, _('Cartella contesto non valida'), str(exc))
+            return
+        if not resolved.is_dir():
+            QMessageBox.warning(
+                self,
+                _('Cartella contesto non valida'),
+                _('Seleziona una cartella esistente.'),
+            )
+            return
+        editor = getattr(self, 'external_context_paths_edit', None)
+        if editor is None:
+            return
+        resolved_text = str(resolved)
+        paths = normalize_external_context_paths([*current_paths, resolved_text])
+        if resolved_text not in paths:
+            QMessageBox.information(
+                self,
+                _('Contesto non aggiunto'),
+                _(
+                    'Il contesto selezionato è già presente oppure è stato ignorato perché il limite è {limit} cartelle.'
+                ).format(limit=MAX_EXTERNAL_CONTEXT_PATHS),
+            )
+            return
+        editor.setPlainText("\n".join(paths))
+        self.save_external_context_paths()
+
 
     def refresh_web_settings(self) -> None:
         self.web_auto_start_check.blockSignals(True)
@@ -178,7 +277,51 @@ class SettingsActionsMixin(PreferredWebAIActionsMixin):
         )
         self.web_totp_disable_button.setEnabled(enabled)
         self.web_totp_local_bypass_check.setEnabled(enabled)
+        console_check = getattr(self, 'windows_show_diagnostic_consoles_check', None)
+        if console_check is not None:
+            console_check.blockSignals(True)
+            console_check.setChecked(self.settings.windows_show_diagnostic_consoles)
+            console_check.blockSignals(False)
 
+    def set_windows_diagnostic_consoles(self, enabled: bool) -> None:
+        self.settings.windows_show_diagnostic_consoles = bool(enabled)
+        self.settings_store.save(self.settings)
+        self._show_status(
+            _('Le console di diagnostica saranno visibili dal prossimo avvio.')
+            if enabled
+            else _('Le console di diagnostica resteranno nascoste; gli errori saranno salvati nei log.')
+        )
+
+    def _open_diagnostic_path(self, path: Path, title: str, *, directory: bool = False) -> None:
+        try:
+            target = path
+            if directory:
+                target.mkdir(parents=True, exist_ok=True)
+            else:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.touch(exist_ok=True)
+        except OSError as exc:
+            QMessageBox.warning(self, title, str(exc))
+            return
+        if not QDesktopServices.openUrl(QUrl.fromLocalFile(str(target))):
+            QMessageBox.warning(
+                self,
+                title,
+                _('Impossibile aprire il percorso di diagnostica:\n{path}').format(path=target),
+            )
+
+    def open_desktop_log(self) -> None:
+        self._open_diagnostic_path(desktop_log_path(), _('Log applicazione BridgAI'))
+
+    def open_web_server_log(self) -> None:
+        self._open_diagnostic_path(web_log_path(), _('Log server web'))
+
+    def open_logs_directory(self) -> None:
+        self._open_diagnostic_path(
+            logs_directory(),
+            _('Cartella log BridgAI'),
+            directory=True,
+        )
 
     def configure_web_two_factor(self) -> None:
         if not self.save_web_settings():
@@ -267,6 +410,84 @@ class SettingsActionsMixin(PreferredWebAIActionsMixin):
         self._stop_owned_web_interface_after_root_change()
         self._show_status(_('Cartella root progetti impostata: {path}').format(path=resolved))
 
+
+    def create_web_workspace_batch_reports(self) -> None:
+        root_text = self.settings.web_workspace_root.strip()
+        if not root_text:
+            QMessageBox.warning(
+                self,
+                _('Cartella root non configurata'),
+                _('Configura prima la cartella root dei progetti Web UI.'),
+            )
+            return
+        root = Path(root_text).expanduser()
+        answer = QMessageBox.question(
+            self,
+            _('Report batch progetti'),
+            _(
+                'Generare un report Markdown per ogni cartella di primo livello nella root progetti '
+                'e salvarli in uno ZIP pronto da scaricare?'
+            ),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        progress = QProgressDialog(
+            _('Preparazione report batch…'),
+            _('Annulla'),
+            0,
+            0,
+            self,
+        )
+        progress.setWindowTitle(_('Report batch progetti'))
+        progress.setMinimumDuration(0)
+        progress.setAutoClose(False)
+        progress.setAutoReset(False)
+        progress.show()
+
+        def update_progress(index: int, total: int, project: Path) -> None:
+            if progress.maximum() != total:
+                progress.setRange(0, total)
+            progress.setValue(max(0, index - 1))
+            progress.setLabelText(
+                _('Creazione report progetto {index} di {total}: {name}').format(
+                    index=index,
+                    total=total,
+                    name=project.name,
+                )
+            )
+            QCoreApplication.processEvents()
+            if progress.wasCanceled():
+                raise RuntimeError(_('Report batch annullato.'))
+
+        try:
+            result = create_batch_project_reports_zip(
+                root,
+                task='Report batch del progetto.',
+                settings=self.settings,
+                progress_callback=update_progress,
+            )
+            progress.setValue(progress.maximum())
+            QCoreApplication.processEvents()
+        except Exception as exc:
+            progress.close()
+            QMessageBox.critical(self, _('Report batch fallito'), str(exc))
+            return
+        progress.close()
+        self._show_status(
+            _('Report batch creato: {count} progetti, {path}').format(
+                count=len(result.projects),
+                path=result.path,
+            )
+        )
+        QMessageBox.information(
+            self,
+            _('Report batch pronto'),
+            _('ZIP creato nella root progetti:\n{path}').format(path=result.path),
+        )
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(result.path.parent)))
+
     def clear_web_workspace_root(self) -> None:
         if not self.settings.web_workspace_root:
             return
@@ -331,6 +552,9 @@ class SettingsActionsMixin(PreferredWebAIActionsMixin):
             if self.settings.web_totp_enabled else False
         )
         self.settings.web_auto_start = self.web_auto_start_check.isChecked()
+        console_check = getattr(self, 'windows_show_diagnostic_consoles_check', None)
+        if console_check is not None:
+            self.settings.windows_show_diagnostic_consoles = console_check.isChecked()
         self.settings_store.save(self.settings)
         return True
 
@@ -338,6 +562,11 @@ class SettingsActionsMixin(PreferredWebAIActionsMixin):
         if not self.save_web_settings():
             return
         try:
+            console_options = (
+                {"show_console": True}
+                if self.settings.windows_show_diagnostic_consoles
+                else {}
+            )
             result = start_web_interface(
                 self.settings.web_port,
                 open_browser=self.settings.web_open_browser,
@@ -350,6 +579,7 @@ class SettingsActionsMixin(PreferredWebAIActionsMixin):
                     if self.settings.web_totp_enabled else None
                 ),
                 totp_local_bypass=self.settings.web_totp_local_bypass,
+                **console_options,
             )
         except Exception as exc:
             QMessageBox.critical(self, _('Avvio interfaccia web fallito'), str(exc))
@@ -366,6 +596,26 @@ class SettingsActionsMixin(PreferredWebAIActionsMixin):
                 info_url = f"{result.url} (Rete locale: {ips_str})"
         self._show_status(f'{message} {info_url}')
         QMessageBox.information(self, _('Interfaccia web'), f'{message}\n{info_url}')
+
+    def start_windows_direct_web_server_from_settings(self) -> None:
+        try:
+            result = start_windows_direct_web_server(show_console=True)
+        except Exception as exc:
+            QMessageBox.critical(self, _('Avvio server web forzato fallito'), str(exc))
+            return
+        if result.process is not None:
+            self.web_process = result.process
+        message = (
+            _('Interfaccia web già attiva.')
+            if result.already_running
+            else _('Server web forzato avviato.')
+        )
+        self._show_status(f'{message} {result.url}')
+        QMessageBox.information(
+            self,
+            _('Interfaccia web'),
+            f'{message}\n{result.url}',
+        )
 
     def stop_web_interface_from_settings(self) -> None:
         process = getattr(self, "web_process", None)

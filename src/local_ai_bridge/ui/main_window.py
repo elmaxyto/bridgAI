@@ -39,6 +39,7 @@ from local_ai_bridge.ui.browser_extension_actions import BrowserExtensionActions
 from local_ai_bridge.ui.change_actions import ChangeActionsMixin
 from local_ai_bridge.ui.github_actions import GitHubActionsMixin
 from local_ai_bridge.ui.layouts import build_central_ui
+from local_ai_bridge.ui.layout_managers.simple_mode_manager import SimpleModeManager
 from local_ai_bridge.ui.operations_actions import OperationsActionsMixin
 from local_ai_bridge.ui.tabs.operations import build_operations_tab
 from local_ai_bridge.ui.recent_projects import RecentProjectsMixin
@@ -49,9 +50,6 @@ from local_ai_bridge.ui.tool_actions import ToolActionsMixin
 from local_ai_bridge.ui.workflow_actions import WorkflowActionsMixin
 from local_ai_bridge.ui.workers import FunctionWorker
 
-
-SIMPLE_MODE_WIDTH = 800
-SIMPLE_MODE_HEIGHT = 900
 
 
 def _project_display_name(path: Path) -> str:
@@ -67,6 +65,23 @@ def _validated_project_name(value: str) -> str:
     if name in {'.', '..'} or '/' in name or '\\' in name:
         raise ValueError(_('Il nome del progetto non può contenere separatori di percorso.'))
     return name
+
+
+def _is_empty_directory(path: Path) -> bool:
+    try:
+        next(path.iterdir())
+    except StopIteration:
+        return True
+    return False
+
+
+def _new_project_path(parent: Path, project_name: str) -> Path:
+    selected = parent.resolve()
+    if selected.name == project_name:
+        if _is_empty_directory(selected):
+            return selected
+        raise FileExistsError(project_name)
+    return selected / project_name
 
 
 def _reset_project_ui(window) -> None:
@@ -139,7 +154,7 @@ class MainWindow(WorkflowActionsMixin, BrowserExtensionActionsMixin, ChangeActio
         self._build_toolbar()
         central_ui = build_central_ui(self)
         self.operations_tab = build_operations_tab(self)
-        self.tabs.insertTab(0, self.operations_tab, _('Modalità Operativa'))
+        self.tabs.addTab(self.operations_tab, _('Attività AI'))
         self.refresh_operational_missions()
         self.setCentralWidget(central_ui)
         self.setStatusBar(QStatusBar(self))
@@ -206,153 +221,24 @@ class MainWindow(WorkflowActionsMixin, BrowserExtensionActionsMixin, ChangeActio
         self._show_status(_('Configurazione iniziale aggiornata.'))
 
     def apply_simple_mode(self) -> None:
-        operations = self.settings.primary_mode == OPERATIONS_MODE
-        operations_index = self.tabs.indexOf(self.operations_tab)
-        settings_index = self.tabs.indexOf(self.settings_tab)
-        if operations_index >= 0:
-            self.tabs.setTabVisible(operations_index, operations)
-        if operations:
-            self.project_panel.setVisible(False)
-            for tab in (
-                self.workflow_tab,
-                self.changes_tab,
-                self.tests_tab,
-                self.publication_tab,
-                self.advanced_tab,
-            ):
-                index = self.tabs.indexOf(tab)
-                if index >= 0:
-                    self.tabs.setTabVisible(index, False)
-            if settings_index >= 0:
-                self.tabs.setTabVisible(settings_index, True)
-                self.tabs.setTabText(settings_index, _('Impostazioni'))
-            if self.tabs.currentWidget() is not self.settings_tab:
-                self.tabs.setCurrentWidget(self.operations_tab)
-            if self.isFullScreen() or self.isMaximized():
-                self.showNormal()
-            self.resize(960, 720)
-            return
-
         simple = bool(self.settings.simple_mode)
         markdown_files = simple and bool(self.settings.markdown_exchange_mode)
-        text_updates = bool(self.settings.textual_file_operations_mode)
-        drive_zip = (
-            simple
-            and bool(self.settings.gemini_drive_enabled)
-            and not markdown_files
-        )
-        if simple:
-            if self.isFullScreen() or self.isMaximized():
-                self.showNormal()
-            self.resize(SIMPLE_MODE_WIDTH, SIMPLE_MODE_HEIGHT)
-        else:
-            if self.isVisible():
-                self.showMaximized()
-            else:
-                QTimer.singleShot(0, self.showMaximized)
-        self.project_panel.setVisible(not simple)
-        changes_index = self.tabs.indexOf(self.changes_tab)
-        tests_index = self.tabs.indexOf(self.tests_tab)
-        publication_index = self.tabs.indexOf(self.publication_tab)
-        advanced_index = self.tabs.indexOf(self.advanced_tab)
-        if changes_index >= 0:
-            self.tabs.setTabVisible(changes_index, not simple or text_updates)
-            self.tabs.setTabText(
-                changes_index,
-                _('Anteprima e applicazione')
-                if text_updates else _('2. ZIP, diff e applicazione'),
-            )
-        if publication_index >= 0:
-            self.tabs.setTabVisible(publication_index, True)
-            self.tabs.setTabText(publication_index, _('Pubblicazione'))
-        for index in (tests_index, advanced_index):
-            if index >= 0:
-                self.tabs.setTabVisible(index, not simple)
-        workflow_index = self.tabs.indexOf(self.workflow_tab)
-        settings_index = self.tabs.indexOf(self.settings_tab)
-        if workflow_index >= 0:
-            self.tabs.setTabVisible(workflow_index, True)
-            self.tabs.setTabText(workflow_index, _('Assistente') if simple else _('1. Report e risposta AI'))
-        if settings_index >= 0:
-            self.tabs.setTabVisible(settings_index, True)
-            self.tabs.setTabText(settings_index, _('Preferenze') if simple else _('Impostazioni'))
-        self.simple_welcome.setVisible(simple)
-        self.simple_subtitle.setVisible(simple)
-        self.simple_finish_hint.setVisible(simple and not text_updates)
-        self.simple_finish_hint.setText(
-            _('3  Quando ricevi uno ZIP dall’AI, salvalo nella cartella scelta e premi “Applica aggiornamento”. Prima dell’applicazione verrà sempre mostrata un’anteprima.')
-        )
-        self.report_edit.setVisible(not simple)
-        self.prompt_preset_label.setVisible(not simple)
-        self.prompt_preset_combo.setVisible(not simple)
-        for button in self.report_extra_buttons:
-            button.setVisible(not simple)
-        self.simple_chatgpt_button.setVisible(simple)
-        self.simple_claude_button.setVisible(simple)
-        self.simple_gemini_button.setVisible(simple)
-        if simple:
-            response_title = _('Incolla la richiesta di file dell’AI')
-            if markdown_files:
-                response_description = _(
-                    'Copia la risposta con la riga #scarica, poi prepara il Markdown con i file completi.'
-                )
-            elif drive_zip:
-                response_description = _(
-                    'Copia la risposta con la riga #scarica, poi prepara lo ZIP nella cartella Google Drive.'
-                )
-            else:
-                response_description = _(
-                    'Copia la risposta con la riga #scarica, poi prepara lo ZIP con i file richiesti.'
-                )
-            response_placeholder = _('Incolla qui la risposta dell’AI che contiene #scarica...')
-        else:
-            response_title = _('Incolla la risposta dell’AI')
-            response_description = _('Torna qui e incolla tutto il messaggio ricevuto, senza modificarlo.')
-            response_placeholder = _('Incolla qui la risposta completa dell’AI...')
-        self.response_step_header.title_label.setText(response_title)
-        self.response_step_header.description_label.setText(response_description)
-        self.response_edit.setPlaceholderText(response_placeholder)
-        self.simple_prepare_files_button.setText(
-            _('Prepara Markdown')
-            if markdown_files else _('Prepara ZIP su Google Drive')
-            if drive_zip else _('Prepara ZIP richiesto')
-        )
-        self.text_result_group.setVisible(text_updates)
-        self.markdown_result_group.setVisible(False)
-        self.target_edit.setVisible(not simple)
-        label = self.target_form.labelForField(self.target_edit)
-        if label is not None:
-            label.setVisible(not simple)
-        for button in self.response_action_buttons:
-            button.setVisible(not simple)
-        for button in self.simple_response_buttons:
-            button.setVisible(simple)
-        self.simple_apply_zip_button.setVisible(simple and not text_updates)
-        self.simple_patch_directory_button.setVisible(
-            simple and not text_updates
-            and not bool(self.settings.update_zip_directory.strip())
-        )
-        self.update_zip_settings_group.setVisible(not text_updates)
-        self.other_llm_settings_group.setVisible(not simple)
-        self.change_source_group.setVisible(not simple)
-        self.change_rollback_button.setVisible(not simple)
-        self.restart_action.setVisible(not simple)
-        self.simple_restart_button.setVisible(simple)
-        for group in getattr(self, 'advanced_settings_groups', []):
-            group.setVisible(not simple)
-        self.gemini_drive_settings_group.setVisible(not simple)
-        self.markdown_exchange_settings_group.setVisible(not simple)
-        self.textual_file_operations_settings_group.setVisible(not simple)
-        self.report_button.setText(
-            _('Prepara richiesta per l’AI') if simple else _('Genera Super-Report')
-        )
-        allowed_simple_tabs = (
-            (self.workflow_tab, self.publication_tab, self.settings_tab, self.changes_tab)
-            if text_updates
-            else (self.workflow_tab, self.publication_tab, self.settings_tab)
-        )
-        if simple and self.tabs.currentWidget() not in allowed_simple_tabs:
-            self.tabs.setCurrentWidget(self.workflow_tab)
+        simple_mode_manager = getattr(self, "_simple_mode_manager", None)
+        if simple_mode_manager is None:
+            simple_mode_manager = SimpleModeManager(self)
+            self._simple_mode_manager = simple_mode_manager
+        simple_mode_manager.apply({
+            "operations": self.settings.primary_mode == OPERATIONS_MODE,
+            "simple": simple,
+            "markdown_files": markdown_files,
+            "text_updates": bool(self.settings.textual_file_operations_mode),
+            "drive_zip": (
+                simple
+                and bool(self.settings.gemini_drive_enabled)
+                and not markdown_files
+            ),
+            "update_zip_directory": self.settings.update_zip_directory,
+        })
 
     def _auto_copy_report_in_simple_mode(self) -> None:
         if not self.settings.simple_mode:
@@ -431,11 +317,6 @@ class MainWindow(WorkflowActionsMixin, BrowserExtensionActionsMixin, ChangeActio
     def create_workspace(self) -> None:
         from PySide6.QtWidgets import QFileDialog
 
-        initial = self.settings.last_workspace or str(Path.home())
-        parent = QFileDialog.getExistingDirectory(self, _('Scegli dove creare il nuovo progetto'), initial)
-        if not parent:
-            return
-
         name, accepted = QInputDialog.getText(
             self,
             _('Nuovo progetto'),
@@ -446,13 +327,31 @@ class MainWindow(WorkflowActionsMixin, BrowserExtensionActionsMixin, ChangeActio
 
         try:
             project_name = _validated_project_name(name)
-            project_path = Path(parent) / project_name
-            project_path.mkdir(exist_ok=False)
+        except ValueError as exc:
+            QMessageBox.critical(self, _('Impossibile creare il progetto'), str(exc))
+            return
+
+        last_workspace = Path(self.settings.last_workspace) if self.settings.last_workspace else Path.home()
+        initial = str(last_workspace.parent if last_workspace.exists() and last_workspace.is_dir() else last_workspace)
+        parent = QFileDialog.getExistingDirectory(
+            self,
+            _('Scegli la cartella che conterrà “{name}”').format(name=project_name),
+            initial,
+        )
+        if not parent:
+            return
+
+        try:
+            project_path = _new_project_path(Path(parent), project_name)
+            if not project_path.exists():
+                project_path.mkdir(exist_ok=False)
         except FileExistsError:
             QMessageBox.warning(
                 self,
                 _('Progetto già esistente'),
-                _('Esiste già una cartella con questo nome. Usa “Apri progetto…” oppure scegli un altro nome.'),
+                _(
+                    'Esiste già una cartella con questo nome. Seleziona una cartella superiore, usa “Apri progetto…” oppure scegli un altro nome.'
+                ),
             )
             return
         except (OSError, ValueError) as exc:
@@ -493,6 +392,9 @@ class MainWindow(WorkflowActionsMixin, BrowserExtensionActionsMixin, ChangeActio
         self.settings.last_workspace = str(path)
         self._remember_recent_workspace(path)
         self.refresh_prompt_settings()
+        from local_ai_bridge.ui.project_notes import refresh_project_notes
+        refresh_project_notes(self)
+        self.ensure_operational_superpower_index()
         if not workspace_changed:
             self.current_plan = None
             self.apply_button.setEnabled(False)

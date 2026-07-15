@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
+
+from local_ai_bridge.core.superpowers import referenced_superpower_ids
+from local_ai_bridge.ui.superpower_dialog import SuperpowerDialog
 from PySide6.QtCore import QUrl
 from PySide6.QtGui import QDesktopServices
-from PySide6.QtWidgets import QApplication, QFileDialog, QMessageBox
+from PySide6.QtWidgets import QApplication, QDialog, QFileDialog, QMessageBox
 
 from local_ai_bridge.core.prompt_presets import compose_task_with_preset
 from local_ai_bridge.i18n import tr as _
@@ -54,6 +57,23 @@ class WorkflowActionsMixin(MarkdownUpdateActionsMixin):
             self.task_edit.setFocus()
             self._show_status(_('Trascrizione inserita nel task.'))
 
+    def choose_superpowers(self) -> None:
+        workspace = Path(self.settings.last_workspace) if self.settings.last_workspace else None
+        current = set(referenced_superpower_ids(self.task_edit.toPlainText()))
+        dialog = SuperpowerDialog(workspace, current, self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        selected = dialog.selected_superpower_ids()
+        text = self.task_edit.toPlainText()
+        lines = [line for line in text.splitlines() if not line.strip().lower().startswith(("@superpower:", "@superpotere:"))]
+        if selected:
+            lines.extend(f"@superpower:{item}" for item in selected)
+        self.task_edit.setPlainText("\n".join(lines).strip())
+        self.superpower_summary.setText(
+            _('{count} superpoteri selezionati').format(count=len(selected)) if selected
+            else _('Nessun superpotere selezionato')
+        )
+
     def generate_report(self) -> None:
         workspace = self._require_workspace()
         if not workspace:
@@ -74,10 +94,7 @@ class WorkflowActionsMixin(MarkdownUpdateActionsMixin):
 
         extension_queued = (
             False
-            if (
-                self.settings.markdown_exchange_mode
-                or self.settings.textual_file_operations_mode
-            )
+            if self.settings.markdown_exchange_mode
             else self.queue_report_with_browser_extension(self.report_edit.toPlainText())
         )
 
@@ -138,8 +155,14 @@ class WorkflowActionsMixin(MarkdownUpdateActionsMixin):
             Path(destination).write_text(text, encoding='utf-8')
             self._show_status(f'Report salvato: {destination}')
 
+    def _external_ai_url(self, url: str) -> str:
+        return url
+
     def _open_web(self, url: str) -> None:
         QDesktopServices.openUrl(QUrl(url))
+
+    def open_ai_page(self, url: str) -> None:
+        self._open_web(self._external_ai_url(url))
 
     def open_external_ai(self, url: str) -> None:
         text = self.report_edit.toPlainText()
@@ -147,7 +170,7 @@ class WorkflowActionsMixin(MarkdownUpdateActionsMixin):
             QMessageBox.information(self, _('Report'), _('Genera prima il Super-Report.'))
             return
         QApplication.clipboard().setText(text)
-        self._open_web(url)
+        self.open_ai_page(url)
         self._show_status(_('Istruzioni copiate: incollale nella chat appena aperta.'))
 
     def open_gemini(self) -> None:

@@ -7,6 +7,8 @@ import urllib.request
 import urllib.parse
 from pathlib import Path
 
+import pytest
+
 from local_ai_bridge.web.server import BridgeHTTPServer, BridgeState
 from local_ai_bridge.web.page import render_index, render_manifest
 from local_ai_bridge.core.models import ChangePlan, FileChange
@@ -146,6 +148,46 @@ def test_restart_endpoint(tmp_path: Path, monkeypatch) -> None:
         thread.join(timeout=5)
 
 
+def test_web_superpower_button_uses_compact_svg_without_emoji() -> None:
+    page = render_index("csrf", "1.1.0")
+    assert '<svg class="button-icon"' in page
+    assert ".button-icon{display:block;width:1.15rem;height:1.15rem" in page
+    assert ".icon-button{display:inline-flex" in page
+    assert "⚡ Richiama superpoteri" not in page
+    assert "apiGet('/api/superpowers/list')" in page
+    assert "api('/api/superpowers/list',{})" not in page
+
+
+def test_web_superpower_list_uses_safe_dom_rendering_and_compact_checkboxes() -> None:
+    page = render_index("csrf", "1.1.0")
+
+    assert "escapeHtml(" not in page
+    assert "title.textContent=item.title||item.id||''" in page
+    assert "description.textContent=item.description||''" in page
+    assert "example.textContent=superpowerExample(item)" in page
+    assert ".superpower-item input[type=checkbox]{width:1.1rem" in page
+    assert ".superpower-example{" in page
+    assert "Nessun superpotere corrisponde ai filtri." in page
+
+
+def test_web_superpower_catalog_is_available_through_get(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+    state = BridgeState()
+    server = BridgeHTTPServer(("127.0.0.1", 0), state)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base = f"http://127.0.0.1:{server.server_address[1]}"
+    try:
+        status, payload = _request(base + "/api/superpowers/list")
+        assert status == 200
+        assert payload["items"]
+        assert all(item["id"] and item["title"] for item in payload["items"])
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
 def test_web_page_uses_guided_simple_workflow() -> None:
     page = render_index("csrf", "1.0.0")
 
@@ -154,6 +196,7 @@ def test_web_page_uses_guided_simple_workflow() -> None:
     assert "Continua su ChatGPT" in page
     assert "Continua su Claude" in page
     assert "Continua su Gemini" in page
+    assert "Continua su DeepSeek" in page
     assert "Prepara i file richiesti" in page
     assert "Applica aggiornamento" in page
     assert 'id="zipUpdateInput"' in page
@@ -236,6 +279,7 @@ def test_pre_apply_summary_reports_risks_and_available_tests(tmp_path: Path) -> 
     assert summary["deleted"] == 1
     assert summary["binary"] == 1
     assert summary["has_commit_message"] is True
+    assert summary["source_name"] == "update.zip"
     assert summary["warning_count"] == 1
     assert summary["origin"] == "zip: update.zip"
     assert "Python compileall" in summary["tests"]
@@ -248,6 +292,18 @@ def test_web_page_renders_pre_apply_checklist() -> None:
     assert "Checklist pre-applicazione" in page
     assert "data.pre_apply" in page
     assert "Hai controllato la checklist pre-applicazione?" in page
+
+
+def test_web_page_shows_update_recap_from_commit_message() -> None:
+    page = render_index("csrf", "1.0.0")
+
+    assert 'id="updateRecap"' in page
+    assert "Recap aggiornamento" in page
+    assert "currentCommitMessage=typeof data.commit_message==='string'" in page
+    assert "Recap aggiornamento:" in page
+    assert "Nessun commit-message.md presente nello ZIP" in page
+    assert "currentPatchFilename" in page
+    assert "File patch: ${currentPatchFilename||'-'}" in page
 
 
 def test_web_page_supports_persistent_light_and_dark_themes() -> None:
@@ -396,6 +452,7 @@ def test_web_page_exposes_power_user_settings_without_sensitive_fields() -> None
     assert 'data-provider="chatgpt"' in page
     assert 'data-provider="claude"' in page
     assert 'data-provider="gemini"' in page
+    assert 'data-provider="deepseek"' in page
     assert 'id="textualFileOperationsMode"' not in page
     assert "/api/power-user/settings" in page
     assert "Credenziali, 2FA, root progetti e chiavi cloud" in page
@@ -657,7 +714,15 @@ def test_web_markdown_update_upload_matches_pasted_text_and_validates_files(
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     base = f"http://127.0.0.1:{server.server_address[1]}"
-    update = """BEGIN_FILE
+    update = """<!-- BRIDGAI:FILE commit-message.md -->
+<!-- BRIDGAI:TEXT final-newline=1 -->
+```markdown
+feat(web): persist Markdown update metadata
+
+- create the uploaded file
+```
+
+BEGIN_FILE
 OPERATION: CREATE
 PATH: created.txt
 FINAL_NEWLINE: YES
@@ -683,6 +748,9 @@ END_FILE
             state.csrf_token,
         )
         assert status == 200
+        assert pasted["commit_message"].startswith(
+            "feat(web): persist Markdown update metadata"
+        )
 
         status, uploaded_md = _upload_file(
             base + "/api/markdown/upload",
@@ -693,6 +761,8 @@ END_FILE
         assert status == 200
         assert uploaded_md["changes"] == pasted["changes"]
         assert uploaded_md["diff"] == pasted["diff"]
+        assert uploaded_md["commit_message"] == pasted["commit_message"]
+        assert uploaded_md["pre_apply"]["source_name"].endswith("bridgai-update.md")
 
         status, uploaded_txt = _upload_file(
             base + "/api/markdown/upload",
@@ -702,6 +772,8 @@ END_FILE
         )
         assert status == 200
         assert uploaded_txt["changes"] == pasted["changes"]
+        assert uploaded_txt["commit_message"] == pasted["commit_message"]
+        assert uploaded_txt["pre_apply"]["source_name"].endswith("bridgai-update.txt")
 
         status, payload = _upload_file(
             base + "/api/markdown/upload",
@@ -733,8 +805,128 @@ def test_web_power_user_settings_expose_ai_compatibility_table() -> None:
     assert '<summary>Compatibilità con le AI Web</summary>' in page
     assert 'class="compatibility-table"' in page
     assert '<th scope="row">Gemini Pro</th><td>ZIP o Markdown</td><td>Markdown</td>' in page
+    assert '<th scope="row">DeepSeek</th><td>Markdown</td><td>Markdown</td>' in page
     assert '<th scope="row">Perplexity</th><td>Markdown consigliato</td><td>Markdown</td>' in page
     assert '<th scope="row">Microsoft Copilot</th><td>Markdown</td><td>Markdown</td>' in page
     assert 'ZIP → ZIP è il flusso consigliato ed è l’unico verificato come pienamente funzionante.' in page
     assert 'le patch Markdown potrebbero non essere applicabili in tutti i casi.' in page
     assert '.compatibility-table-wrap' in page
+
+
+def test_web_project_notes_can_be_added_to_task() -> None:
+    page = render_index("csrf", "1.1.1")
+    assert "notes-grid" in page
+    assert "projectNoteSearch" in page
+    assert "Aggiungi alla richiesta" in page
+    assert "function addProjectNoteToTask()" in page
+    assert "projectNoteRequestText(item)" in page
+
+
+
+def test_web_page_requires_extra_confirmation_for_high_risk_recovery() -> None:
+    page = render_index("csrf", "1.0.0")
+
+    assert "currentPlanRequiresExplicitConfirmation" in page
+    assert "highRiskRecoveryMessage" in page
+    assert "HIGH_RISK_APPLY" in page
+    assert "alta severità, conferma extra richiesta" in page
+
+
+class _FakeRecord:
+    def to_dict(self) -> dict:
+        return {"session_id": "session", "files": []}
+
+
+class _FakeApplyService:
+    def __init__(self) -> None:
+        self.confirmed: bool | None = None
+
+    def apply(self, plan, *, explicit_confirmation: bool = False):
+        self.confirmed = explicit_confirmation
+        if plan.metadata.get("requires_explicit_confirmation") and not explicit_confirmation:
+            raise ValueError("conferma esplicita richiesta")
+        return _FakeRecord()
+
+
+class _FakeBridgeState:
+    def __init__(self, workspace: Path, plan: ChangePlan) -> None:
+        self.workspace = workspace
+        self.plan = plan
+        self.apply_service = _FakeApplyService()
+        self.cleared: str | None = None
+
+    def require_workspace(self) -> Path:
+        return self.workspace
+
+    def get_plan(self, plan_id: str) -> ChangePlan:
+        assert plan_id == "plan-1"
+        return self.plan
+
+    def clear_plan(self, plan_id: str) -> None:
+        self.cleared = plan_id
+
+
+def _high_risk_plan(workspace: Path) -> ChangePlan:
+    return ChangePlan(
+        plan_type="full_file",
+        workspace=workspace,
+        source_path=None,
+        changes=[FileChange("app.py", "app.py", "create", None, "new", size=8)],
+        diff="--- /dev/null\n+++ b/app.py\n",
+        metadata={
+            "contents": {"app.py": b"VALUE=1\n"},
+            "requires_explicit_confirmation": True,
+            "recovery_severity": "high",
+            "recovery_actions": [
+                {"action": "python_syntax_error", "severity": "high", "target": "app.py"}
+            ],
+        },
+    )
+
+
+def test_web_apply_rejects_high_risk_plan_without_explicit_confirmation(tmp_path: Path) -> None:
+    from local_ai_bridge.web.bridge_actions import dispatch_bridge_action
+
+    state = _FakeBridgeState(tmp_path, _high_risk_plan(tmp_path))
+
+    with pytest.raises(ValueError, match="conferma esplicita"):
+        dispatch_bridge_action(
+            state,
+            "/api/plan/apply",
+            {"plan_id": "plan-1", "confirm": "APPLY"},
+            "127.0.0.1",
+        )
+
+    assert state.apply_service.confirmed is False
+    assert state.cleared is None
+
+
+def test_web_apply_passes_high_risk_explicit_confirmation(tmp_path: Path) -> None:
+    from local_ai_bridge.web.bridge_actions import dispatch_bridge_action
+
+    state = _FakeBridgeState(tmp_path, _high_risk_plan(tmp_path))
+
+    payload = dispatch_bridge_action(
+        state,
+        "/api/plan/apply",
+        {
+            "plan_id": "plan-1",
+            "confirm": "APPLY",
+            "explicit_confirmation": "HIGH_RISK_APPLY",
+        },
+        "127.0.0.1",
+    )
+
+    assert state.apply_service.confirmed is True
+    assert state.cleared == "plan-1"
+    assert payload["session"]["session_id"] == "session"
+
+
+def test_web_page_exposes_batch_project_reports_button() -> None:
+    html = render_index("csrf-token", "1.2.3")
+
+    assert "Report batch progetti" in html
+    assert "createBatchProjectReports()" in html
+    assert "batchReportModal" in html
+    assert "Creazione report progetti" in html
+    assert "/api/projects/batch-report" in html

@@ -34,6 +34,7 @@ CATEGORY_PRESENTATIONS = "presentations"
 CATEGORY_IMAGES = "images_graphics"
 CATEGORY_WRITING = "writing_reports"
 CATEGORY_FILE_ORGANIZATION = "file_organization"
+CATEGORY_TRANSLATION = "translation"
 CATEGORY_CUSTOM = "custom"
 MISSION_WORK_CATEGORIES = (
     CATEGORY_DOCUMENTS,
@@ -42,6 +43,7 @@ MISSION_WORK_CATEGORIES = (
     CATEGORY_IMAGES,
     CATEGORY_WRITING,
     CATEGORY_FILE_ORGANIZATION,
+    CATEGORY_TRANSLATION,
     CATEGORY_CUSTOM,
 )
 
@@ -61,3 +63,15 @@ MISSION_TRANSITIONS = {
     MISSION_CANCELLED: frozenset({MISSION_READY, MISSION_ARCHIVED}),
     MISSION_ARCHIVED: frozenset(),
 }
+
+
+_OPERATIONAL_CATEGORY_GROUPS = {}
+
+
+def operational_superpower_allowed(work_category: str, item) -> bool:
+    """Return whether a superpower is explicitly available in an operational sector."""
+    if getattr(item, "usage_mode", "shared") == "development":
+        return False
+    sectors = {value.casefold() for value in getattr(item, "operational_sectors", ())}
+    return work_category.casefold() in sectors or "*" in sectors
+

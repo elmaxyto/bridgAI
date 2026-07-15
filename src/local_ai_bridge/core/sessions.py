@@ -128,13 +128,25 @@ class SessionManager:
                     atomic_write(target, new_data, original_mode=item.get("original_mode"))
             record.status = "applied"
             self.save(directory, record)
+            self._append_project_history(workspace, record)
             return record
         except Exception as exc:
             self._restore(directory, record, check_conflicts=False)
             record.status = "failed_rolled_back"
             record.error = str(exc)
             self.save(directory, record)
+            self._append_project_history(workspace, record)
             raise
+
+    def _append_project_history(self, workspace: Path, record: SessionRecord) -> None:
+        try:
+            from local_ai_bridge.services.project_history import append_project_history
+
+            append_project_history(workspace, record)
+        except Exception:
+            # La cronostoria permanente non deve rendere fallita una patch già applicata
+            # o un rollback già completato. La sessione in app_data resta comunque salvata.
+            return
 
     def rollback_latest(self, workspace: Path) -> SessionRecord:
         latest = self.latest_applied(workspace)
@@ -144,6 +156,7 @@ class SessionManager:
         self._restore(directory, record, check_conflicts=True)
         record.status = "rolled_back"
         self.save(directory, record)
+        self._append_project_history(workspace, record)
         return record
 
     def _restore(self, directory: Path, record: SessionRecord, *, check_conflicts: bool) -> None:

@@ -1,4 +1,4 @@
-# Verification and Validation — BridgAI 1.0.0
+# Verification and Validation — BridgAI 1.1.1
 
 This document separates historical automated results from the current real-world validation of the application. It does not claim a fresh test count unless the commands have actually been executed and recorded.
 
@@ -14,7 +14,7 @@ PYTHONPATH=src pytest -q
 32 passed
 ```
 
-That count is historical and must not be interpreted as the result of the current 1.0.0 suite.
+That count is historical and must not be interpreted as the result of the current 1.1.1 suite.
 
 ## Current automated coverage
 
@@ -37,7 +37,7 @@ The current test suite includes coverage for:
 
 BridgAI has been used continuously to develop BridgAI itself.
 
-The initial 0.1 version provided the report, export, review, and apply workflow used to implement subsequent releases up to 1.0.0. The same application workflow was also used for the latest commit-message and publication-readiness changes.
+The initial 0.1 version provided the report, export, review, and apply workflow used to implement subsequent releases up to 1.1.1. The same application workflow was also used for the latest commit-message, publication-readiness, superpower, project-note, browser-extension, and operational-mode changes.
 
 This is meaningful end-to-end validation of the actual user workflow, including:
 

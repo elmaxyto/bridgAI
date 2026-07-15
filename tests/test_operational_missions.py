@@ -186,3 +186,31 @@ def test_archiving_a_running_web_mission_cancels_it_first(tmp_path: Path) -> Non
 
     assert archived.state == MISSION_ARCHIVED
     assert store.load(mission.mission_id).state == MISSION_ARCHIVED
+
+
+def test_mission_accepts_project_superpower_as_work_category(tmp_path: Path) -> None:
+    store = OperationalMissionStore(tmp_path / "missions")
+    mission = store.create(
+        title="Review",
+        original_request="Review the files",
+        work_category="analisi-critica",
+    )
+    assert mission.work_category == "analisi-critica"
+
+
+def test_web_mission_persists_optional_operational_superpower(tmp_path: Path) -> None:
+    from local_ai_bridge.services.operational_missions import (
+        CATEGORY_DOCUMENTS,
+        PROCEDURE_WEB_MISSION,
+    )
+    store = OperationalMissionStore(tmp_path / "missions")
+    mission = store.create(
+        title="Report",
+        original_request="Prepare the report.",
+        procedure_id=PROCEDURE_WEB_MISSION,
+        work_category=CATEGORY_DOCUMENTS,
+        superpower_id="sintesi-operativa",
+    )
+    loaded = store.load(mission.mission_id)
+    assert loaded.work_category == CATEGORY_DOCUMENTS
+    assert loaded.superpower_id == "sintesi-operativa"

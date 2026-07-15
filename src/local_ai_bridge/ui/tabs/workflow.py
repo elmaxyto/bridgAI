@@ -2,8 +2,15 @@ from __future__ import annotations
 
 from local_ai_bridge.core.prompt_presets import load_prompt_presets
 from local_ai_bridge.i18n import tr as _
-from local_ai_bridge.ui.widgets import _button, _provider_button, _step_header
-from PySide6.QtCore import Qt
+from local_ai_bridge.ui.widgets import (
+    ClearablePlainTextEdit,
+    IconButton,
+    _button,
+    _provider_button,
+    _step_header,
+)
+from PySide6.QtCore import QByteArray, Qt
+from PySide6.QtGui import QIcon, QPixmap
 from PySide6.QtWidgets import (
     QComboBox,
     QFormLayout,
@@ -15,6 +22,15 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+
+
+def _superpower_icon() -> QIcon:
+    """Return a bundled, dependency-free SVG icon for the superpower action."""
+    svg = b"""<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"#7c3aed\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"m13 2-2 8h7l-9 12 2-8H4z\"/></svg>"""
+    pixmap = QPixmap()
+    pixmap.loadFromData(QByteArray(svg), "SVG")
+    return QIcon(pixmap)
+
 
 def build_workflow_tab(window) -> QWidget:
     page = QWidget()
@@ -37,8 +53,26 @@ def build_workflow_tab(window) -> QWidget:
     task_layout = QVBoxLayout(task_group)
     task_layout.setContentsMargins(18, 16, 18, 18)
     task_layout.setSpacing(12)
-    task_layout.addWidget(_step_header('1', _('Descrivi la richiesta'), _('Scrivi con parole semplici cosa vuoi creare, correggere o migliorare.')))
-    window.task_edit = QPlainTextEdit()
+    task_header_row = QHBoxLayout()
+    task_header_row.setSpacing(12)
+    task_header_row.addWidget(
+        _step_header(
+            '1',
+            _('Descrivi la richiesta'),
+            _('Scrivi con parole semplici cosa vuoi creare, correggere o migliorare.'),
+        ),
+        1,
+    )
+    window.superpower_summary = QLabel(_('Nessun superpotere selezionato'))
+    window.superpower_summary.setWordWrap(False)
+    window.superpower_summary.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+    window.superpower_summary.setMinimumWidth(180)
+    task_header_row.addWidget(window.superpower_summary, 0, Qt.AlignmentFlag.AlignRight)
+    window.superpower_button = _button(_('Richiama superpoteri'), window.choose_superpowers)
+    window.superpower_button.setIcon(_superpower_icon())
+    task_header_row.addWidget(window.superpower_button, 0, Qt.AlignmentFlag.AlignRight)
+    task_layout.addLayout(task_header_row)
+    window.task_edit = ClearablePlainTextEdit(clear_tooltip=_('Svuota il campo'))
     window.task_edit.setPlaceholderText(_('Ad esempio: rendi più semplice la schermata iniziale e usa pulsanti più chiari...'))
     window.task_edit.setMaximumHeight(120)
     window.task_edit.setProperty('class', 'largeInput')
@@ -72,23 +106,30 @@ def build_workflow_tab(window) -> QWidget:
         window.open_gemini,
         '#6c63ff',
     )
+    window.simple_deepseek_button = _provider_button(
+        _('Continua su DeepSeek'),
+        lambda: window.open_external_ai('https://chat.deepseek.com/'),
+        '#2f80ed',
+    )
     window.simple_provider_buttons = {
         'chatgpt': window.simple_chatgpt_button,
         'claude': window.simple_claude_button,
         'gemini': window.simple_gemini_button,
+        'deepseek': window.simple_deepseek_button,
     }
     window.simple_report_buttons = list(window.simple_provider_buttons.values())
     for button in window.simple_provider_buttons.values():
         report_buttons.addWidget(button)
     window.refresh_preferred_web_ai_settings()
-    actions = ((_('Copia report'), window.copy_report), (_('Salva report'), window.save_report), (_('Apri ChatGPT'), lambda: window._open_web(window.settings.chatgpt_url)), (_('Apri Claude'), lambda: window._open_web(window.settings.claude_url)), (_('Apri Gemini'), window.open_gemini))
+    actions = ((_('Copia report'), window.copy_report), (_('Salva report'), window.save_report), (_('Apri ChatGPT'), lambda: window.open_ai_page(window.settings.chatgpt_url)), (_('Apri Claude'), lambda: window._open_web(window.settings.claude_url)), (_('Apri Gemini'), window.open_gemini), (_('Apri DeepSeek'), lambda: window.open_ai_page('https://chat.deepseek.com/')))
     window.report_extra_buttons = []
     for label, callback in actions:
         button = _button(label, callback)
         window.report_extra_buttons.append(button)
         report_buttons.addWidget(button)
     report_buttons.addStretch(1)
-    window.speech_button = _button('🎙', window.open_speech_dialog, 'icon')
+    window.speech_button = IconButton('microphone')
+    window.speech_button.clicked.connect(window.open_speech_dialog)
     window.speech_button.setAccessibleName(_('Dettatura'))
     window.speech_button.setToolTip(_('Detta il task tramite microfono'))
     report_buttons.addWidget(window.speech_button)
@@ -109,7 +150,7 @@ def build_workflow_tab(window) -> QWidget:
     response_layout.setSpacing(12)
     window.response_step_header = _step_header('2', _('Incolla la risposta dell’AI'), _('Torna qui e incolla tutto il messaggio ricevuto, senza modificarlo.'))
     response_layout.addWidget(window.response_step_header)
-    window.response_edit = QPlainTextEdit()
+    window.response_edit = ClearablePlainTextEdit(clear_tooltip=_('Svuota il campo'))
     window.response_edit.setPlaceholderText(_('Incolla qui la risposta completa dell’AI...'))
     window.response_edit.setProperty('class', 'largeInput')
     response_layout.addWidget(window.response_edit, 2)
@@ -134,7 +175,12 @@ def build_workflow_tab(window) -> QWidget:
     ]
     for button in window.simple_response_buttons:
         response_buttons.addWidget(button)
-    window.simple_apply_zip_button = _button(_('Applica aggiornamento'), window.apply_latest_zip, 'success')
+    window.simple_apply_zip_button = _button(
+        _('Applica aggiornamento · Shift: scegli ZIP'),
+        window.apply_latest_zip,
+        'success',
+    )
+    window.refresh_apply_zip_button_hint()
     response_buttons.addWidget(window.simple_apply_zip_button)
     window.simple_patch_directory_button = _button(_('Scegli cartella aggiornamenti'), window.choose_update_zip_directory)
     response_buttons.addWidget(window.simple_patch_directory_button)

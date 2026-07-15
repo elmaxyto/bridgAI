@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import sys
+
 from local_ai_bridge.i18n import tr as _
 from local_ai_bridge.ui.widgets import ToggleSwitch, _button
 from PySide6.QtCore import Qt
@@ -86,7 +88,8 @@ def _build_browser_extension_group(window) -> QGroupBox:
         _(
             'L’estensione Chrome è facoltativa: quando è disattivata BridgAI mantiene '
             'esattamente il flusso manuale corrente. Quando è attiva può inviare il report, '
-            'ricevere la risposta, gestire #scarica e rilevare lo ZIP finale.'
+            'ricevere la risposta, gestire #scarica e rilevare lo ZIP finale. '
+            'L’estensione funziona correttamente solo quando il server Web BridgAI è avviato.'
         )
     )
     description.setWordWrap(True)
@@ -155,6 +158,13 @@ def _build_browser_extension_group(window) -> QGroupBox:
 
     actions = QHBoxLayout()
     actions.addWidget(_button(_('Apri cartella estensione'), window.open_browser_extension_folder))
+    if sys.platform == 'win32':
+        actions.addWidget(
+            _button(
+                _('Avvia server Web per l’estensione'),
+                window.start_browser_extension_web_server,
+            )
+        )
     actions.addWidget(_button(_('Verifica connessione'), window.verify_browser_extension_connection))
     actions.addStretch(1)
     layout.addLayout(actions)
